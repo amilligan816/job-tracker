@@ -1,0 +1,82 @@
+# Dev-only persistent storage: Postgres + MinIO.
+#
+# The root docker-compose.yml `include`s this file and adds the app services, so
+# the usual entry point is `docker compose up` from the repo root.
+#
+# To run just the storage services, pass the root .env explicitly -- compose
+# otherwise resolves .env next to *this* file and silently falls back to the
+# defaults below:
+#   docker compose --env-file .env -f infra/docker-compose.yml up -d
+name: job-tracker
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobtracker}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-dev}
+      POSTGRES_DB: ${POSTGRES_DB:-jobtracker}
+    ports:
+      # Published so host-run tooling (psql, alembic, a locally run backend) works.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobtracker} -d ${POSTGRES_DB:-jobtracker}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - jt-internal
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-dev}
+    ports:
+      # The API port must be published: presigned URLs are opened by the browser.
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - jt-internal
+      - jt-external
+
+  # One-shot: creates the bucket so the backend never has to guess at startup.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-me-in-dev}
+      S3_BUCKET: ${S3_BUCKET:-job-tracker}
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 \"$$MINIO_ROOT_USER\" \"$$MINIO_ROOT_PASSWORD\" &&
+      mc mb --ignore-existing \"local/$$S3_BUCKET\" &&
+      echo 'bucket ready: '\"$$S3_BUCKET\"
+      "
+    networks:
+      - jt-internal
+
+volumes:
+  pgdata:
+  miniodata:
+
+networks:
+  jt-internal:
+  jt-external:
