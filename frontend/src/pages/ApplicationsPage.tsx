@@ -21,6 +21,7 @@ import { Link as RouterLink, useNavigate, useSearchParams } from "react-router-d
 import { api } from "../api/client";
 import { APPLICATION_STATUSES, type ApplicationStatus } from "../api/types";
 import QueryState from "../components/QueryState";
+import { MatchScoreCell } from "../components/MatchScore";
 import StatusChip from "../components/StatusChip";
 import { STATUS_META } from "../theme";
 
@@ -33,7 +34,10 @@ export default function ApplicationsPage() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["applications", status],
     queryFn: () =>
-      api.applications.list(status ? { status: [status as ApplicationStatus] } : {}),
+      api.applications.list({
+        ...(status ? { status: [status as ApplicationStatus] } : {}),
+        with_match: true,
+      }),
   });
 
   return (
@@ -85,6 +89,7 @@ export default function ApplicationsPage() {
                   <TableCell>Stage</TableCell>
                   <TableCell>Applied</TableCell>
                   <TableCell>Next action</TableCell>
+                  <TableCell align="right">Match</TableCell>
                   <TableCell align="right">Interest</TableCell>
                 </TableRow>
               </TableHead>
@@ -123,6 +128,9 @@ export default function ApplicationsPage() {
                       ) : (
                         "—"
                       )}
+                    </TableCell>
+                    <TableCell align="right">
+                      <MatchScoreCell score={app.match_score} rating={app.match_rating} />
                     </TableCell>
                     <TableCell align="right">
                       {app.excitement ? "★".repeat(app.excitement) : "—"}

@@ -9,6 +9,7 @@ import type {
   DocumentKind,
   JobPosting,
   PipelineSummary,
+  PostingMatch,
   StoredDocument,
 } from "./types";
 
@@ -87,8 +88,13 @@ export const api = {
   },
 
   applications: {
-    list: (params: { status?: ApplicationStatus[]; due_before?: string } = {}) =>
-      request<Application[]>(`/applications${qs(params)}`),
+    list: (
+      params: {
+        status?: ApplicationStatus[];
+        due_before?: string;
+        with_match?: boolean;
+      } = {},
+    ) => request<Application[]>(`/applications${qs(params)}`),
     summary: () => request<PipelineSummary>("/applications/summary"),
     get: (id: string) => request<ApplicationDetail>(`/applications/${id}`),
     create: (body: Record<string, unknown>) =>
@@ -99,6 +105,10 @@ export const api = {
         body: JSON.stringify(body),
       }),
     remove: (id: string) => request<void>(`/applications/${id}`, { method: "DELETE" }),
+    match: (id: string, resumeDocumentId?: string) =>
+      request<PostingMatch>(
+        `/applications/${id}/match${qs({ resume_document_id: resumeDocumentId })}`,
+      ),
     addEvent: (id: string, body: Record<string, unknown>) =>
       request<ApplicationEvent>(`/applications/${id}/events`, {
         method: "POST",
@@ -107,15 +117,28 @@ export const api = {
   },
 
   documents: {
-    list: (params: { application_id?: string; kind?: DocumentKind } = {}) =>
-      request<StoredDocument[]>(`/documents${qs(params)}`),
-    upload: (file: File, kind: DocumentKind, applicationId?: string) => {
+    list: (
+      params: { application_id?: string; kind?: DocumentKind } = {},
+    ) => request<StoredDocument[]>(`/documents${qs(params)}`),
+    upload: (
+      file: File,
+      kind: DocumentKind,
+      options: {
+        applicationId?: string;
+        derivedFromId?: string;
+        makeBase?: boolean;
+      } = {},
+    ) => {
       const form = new FormData();
       form.append("file", file);
       form.append("kind", kind);
-      if (applicationId) form.append("application_id", applicationId);
+      if (options.applicationId) form.append("application_id", options.applicationId);
+      if (options.derivedFromId) form.append("derived_from_id", options.derivedFromId);
+      if (options.makeBase) form.append("make_base", "true");
       return request<StoredDocument>("/documents", { method: "POST", body: form });
     },
+    setBase: (id: string) =>
+      request<StoredDocument>(`/documents/${id}/set-base`, { method: "POST" }),
     downloadUrl: (id: string) =>
       request<{ url: string; expires_in: number }>(`/documents/${id}/download`),
     remove: (id: string) => request<void>(`/documents/${id}`, { method: "DELETE" }),

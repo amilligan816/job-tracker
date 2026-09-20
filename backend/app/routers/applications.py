@@ -1,20 +1,24 @@
 import uuid
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.crud import apply_updates, get_or_404
 from app.db import get_db
+from app.matching import rate_match
 from app.models import (
     Application,
     ApplicationEvent,
     ApplicationStatus,
+    Document,
+    DocumentKind,
     EventKind,
     JobPosting,
 )
+from app.resumes import find_resume
 from app.schemas import (
     ApplicationCreate,
     ApplicationDetail,
@@ -23,6 +27,7 @@ from app.schemas import (
     ApplicationRead,
     ApplicationUpdate,
     PipelineSummary,
+    PostingMatch,
 )
 
 router = APIRouter(prefix="/applications", tags=["applications"])
@@ -42,6 +47,9 @@ async def list_applications(
     company_id: uuid.UUID | None = None,
     due_before: date | None = Query(
         default=None, description="Only applications whose next action falls on or before this date"
+    ),
+    with_match: bool = Query(
+        default=False, description="Also compute each row's deterministic match score"
     ),
     limit: int = Query(default=200, le=1000),
     offset: int = 0,
@@ -63,7 +71,11 @@ async def list_applications(
         stmt = stmt.where(Application.next_action_on <= due_before)
 
     result = await db.execute(stmt.limit(limit).offset(offset))
-    return result.scalars().all()
+    applications = result.scalars().all()
+
+    if with_match:
+        await _attach_match_scores(db, applications)
+    return applications
 
 
 @router.get("/summary", response_model=PipelineSummary)
@@ -137,6 +149,118 @@ async def update_application(
 async def delete_application(application_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     application = await get_or_404(db, Application, application_id)
     await db.delete(application)
+
+
+@router.get("/{application_id}/match", response_model=PostingMatch)
+async def match_rating(
+    application_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    resume_document_id: uuid.UUID | None = Query(
+        default=None, description="Defaults to the most relevant stored resume"
+    ),
+):
+    """Rate this application's posting against a resume.
+
+    Pure string matching over a skill vocabulary -- no model call, so it is free,
+    instant and gives the same answer every time. A `score` of null means there
+    is no resume, or the posting names too few recognisable skills to rate.
+    """
+    result = await db.execute(
+        select(Application)
+        .options(selectinload(Application.posting))
+        .where(Application.id == application_id)
+    )
+    application = result.scalar_one_or_none()
+    if application is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Application {application_id} not found"
+        )
+
+    resume = await find_resume(db, application_id, resume_document_id)
+    if resume_document_id and resume is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Document {resume_document_id} not found",
+        )
+
+    posting = application.posting
+    rated = rate_match(
+        posting_raw_text=posting.raw_text if posting else None,
+        posting_extracted=posting.extracted if posting else None,
+        resume_text=resume.extracted_text if resume else None,
+    )
+    return PostingMatch(
+        score=rated.score,
+        rating=rated.rating,
+        confidence=rated.confidence,
+        explanation=rated.explanation,
+        matched=rated.matched,
+        missing=rated.missing,
+        extra=rated.extra,
+        coverage=rated.coverage,
+        required_years=rated.required_years,
+        resume_years=rated.resume_years,
+        years_basis=rated.years_basis,
+        resume_document_id=resume.id if resume else None,
+    )
+
+
+async def _attach_match_scores(db: AsyncSession, applications: list[Application]) -> None:
+    """Rate a page of applications.
+
+    Resolves the same resume per row that `/{id}/match` would -- the tailored
+    resume when there is one, else the base -- but in two queries for the whole
+    page rather than one lookup per row, so the list cannot disagree with the
+    detail view.
+    """
+    if not applications:
+        return
+
+    base = await find_resume(db, None)
+    tailored = await _tailored_resume_text(db, [a.id for a in applications])
+
+    if base is None and not tailored:
+        return
+
+    base_text = base.extracted_text if base else None
+
+    for application in applications:
+        posting = application.posting
+        if posting is None:
+            continue
+        resume_text = tailored.get(application.id) or base_text
+        rated = rate_match(
+            posting_raw_text=posting.raw_text,
+            posting_extracted=posting.extracted,
+            resume_text=resume_text,
+        )
+        # Set on the ORM object purely so the response model picks it up; these
+        # are not mapped columns, so nothing is written back to the database.
+        application.match_score = rated.score
+        application.match_rating = rated.rating
+
+
+async def _tailored_resume_text(
+    db: AsyncSession, application_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, str]:
+    """Newest tailored resume text per application, in one query."""
+    if not application_ids:
+        return {}
+
+    result = await db.execute(
+        select(Document.application_id, Document.extracted_text)
+        .where(
+            Document.kind == DocumentKind.tailored_resume,
+            Document.application_id.in_(application_ids),
+            Document.extracted_text.isnot(None),
+        )
+        .order_by(Document.application_id, Document.created_at.desc())
+    )
+    newest: dict[uuid.UUID, str] = {}
+    for application_id, text in result.all():
+        # Ordered newest-first per application, so the first win stands.
+        newest.setdefault(application_id, text)
+    return newest
 
 
 # ---------------------------------------------------------------------------- events

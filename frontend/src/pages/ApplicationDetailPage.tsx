@@ -21,6 +21,7 @@ import { Link as RouterLink, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { APPLICATION_STATUSES, type ApplicationStatus } from "../api/types";
 import AssistantPanel from "../components/AssistantPanel";
+import MatchCard from "../components/MatchCard";
 import QueryState from "../components/QueryState";
 import StatusChip from "../components/StatusChip";
 import { STATUS_META } from "../theme";
@@ -40,6 +41,7 @@ export default function ApplicationDetailPage() {
     queryClient.invalidateQueries({ queryKey: ["application", id] });
     queryClient.invalidateQueries({ queryKey: ["applications"] });
     queryClient.invalidateQueries({ queryKey: ["summary"] });
+    queryClient.invalidateQueries({ queryKey: ["match", id] });
   };
 
   const update = useMutation({
@@ -195,6 +197,8 @@ export default function ApplicationDetailPage() {
                       </Stack>
                     </CardContent>
                   </Card>
+
+                  <MatchCard applicationId={id} />
 
                   {data.posting?.extracted && <PostingFacts extracted={data.posting.extracted} />}
 

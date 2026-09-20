@@ -17,7 +17,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api } from "../api/client";
-import type { AssistantRun, MatchAnalysis, StoredDocument } from "../api/types";
+import {
+  DOCUMENT_KIND_LABELS,
+  type AssistantRun,
+  type MatchAnalysis,
+  type StoredDocument,
+} from "../api/types";
 
 type Kind = "match_analysis" | "cover_letter" | "interview_prep";
 
@@ -39,7 +44,10 @@ export default function AssistantPanel({
     queryFn: () => api.assistant.runs(applicationId),
   });
 
-  const resumes = documents.filter((d) => d.kind === "resume");
+  // Tailored first: that is what would actually be sent for this application.
+  const resumes = documents
+    .filter((d) => d.kind === "tailored_resume" || d.kind === "base_resume")
+    .sort((a, b) => Number(b.kind === "tailored_resume") - Number(a.kind === "tailored_resume"));
 
   const run = useMutation({
     mutationFn: (kind: Kind) => {
@@ -87,13 +95,13 @@ export default function AssistantPanel({
             helperText={
               resumes.length
                 ? "Which resume to compare against."
-                : "No resume attached — the newest uploaded resume is used."
+                : "None attached — the tailored resume, else your base resume, is used."
             }
           >
-            <MenuItem value="">Most recent resume</MenuItem>
+            <MenuItem value="">Tailored, else base resume</MenuItem>
             {resumes.map((doc) => (
               <MenuItem key={doc.id} value={doc.id}>
-                {doc.filename}
+                {doc.filename} — {DOCUMENT_KIND_LABELS[doc.kind]}
               </MenuItem>
             ))}
           </TextField>

@@ -169,6 +169,9 @@ class ApplicationRead(ORMModel, ApplicationBase):
     created_at: datetime
     updated_at: datetime
     posting: JobPostingRead | None = None
+    # Filled in by the list endpoint when a resume is available; see /match for why.
+    match_score: int | None = None
+    match_rating: str | None = None
 
 
 class ApplicationDetail(ApplicationRead):
@@ -188,11 +191,44 @@ class DocumentRead(ORMModel):
     size_bytes: int
     storage_key: str
     created_at: datetime
+    # True for the one base resume that tailored resumes are written from.
+    is_base: bool = False
+    # For a tailored resume: the base resume it came from.
+    derived_from_id: uuid.UUID | None = None
+    # Whether plain text could be read out of it; the matcher needs this.
+    has_text: bool = False
 
 
 class DocumentDownload(BaseModel):
     url: str
     expires_in: int
+
+
+# ----------------------------------------------------------------------- match rating
+
+
+class MatchSkill(ORMModel):
+    skill: str
+    weight: int
+    source: str
+
+
+class PostingMatch(BaseModel):
+    """Deterministic resume-vs-posting rating. No model call involved."""
+
+    # None when there is no resume, or the posting is too thin to rate.
+    score: int | None
+    rating: str
+    confidence: str
+    explanation: str
+    matched: list[MatchSkill] = Field(default_factory=list)
+    missing: list[MatchSkill] = Field(default_factory=list)
+    extra: list[str] = Field(default_factory=list)
+    coverage: float | None = None
+    required_years: int | None = None
+    resume_years: int | None = None
+    years_basis: str | None = None
+    resume_document_id: uuid.UUID | None = None
 
 
 # --------------------------------------------------------------------------- assistant

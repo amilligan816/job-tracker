@@ -11,11 +11,21 @@ export type ApplicationStatus =
 export type RemoteType = "onsite" | "hybrid" | "remote" | "unknown";
 
 export type DocumentKind =
-  | "resume"
+  | "base_resume"
+  | "tailored_resume"
   | "cover_letter"
   | "portfolio"
   | "offer_letter"
   | "other";
+
+export const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
+  base_resume: "Base resume",
+  tailored_resume: "Tailored resume",
+  cover_letter: "Cover letter",
+  portfolio: "Portfolio",
+  offer_letter: "Offer letter",
+  other: "Other",
+};
 
 export type EventKind =
   | "status_change"
@@ -104,6 +114,34 @@ export interface StoredDocument {
   size_bytes: number;
   storage_key: string;
   created_at: string;
+  /** True for the single base resume that tailored resumes are written from. */
+  is_base: boolean;
+  /** For a tailored resume: the base resume it came from. */
+  derived_from_id: string | null;
+  /** Whether readable text was extracted; the matcher needs it. */
+  has_text: boolean;
+}
+
+export interface MatchSkill {
+  skill: string;
+  weight: number;
+  source: string;
+}
+
+export interface PostingMatch {
+  /** null when there is no resume, or the posting is too thin to rate. */
+  score: number | null;
+  rating: string;
+  confidence: "high" | "medium" | "none";
+  explanation: string;
+  matched: MatchSkill[];
+  missing: MatchSkill[];
+  extra: string[];
+  coverage: number | null;
+  required_years: number | null;
+  resume_years: number | null;
+  years_basis: string | null;
+  resume_document_id: string | null;
 }
 
 export interface Application {
@@ -118,6 +156,9 @@ export interface Application {
   notes: string | null;
   created_at: string;
   updated_at: string;
+  /** Present only when the list was fetched with `with_match`. */
+  match_score: number | null;
+  match_rating: string | null;
 }
 
 export interface ApplicationDetail extends Application {

@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -9,14 +9,8 @@ from app.config import get_settings
 from app.crud import get_or_404
 from app.db import get_db
 from app.llm import analyze_match, draft_cover_letter, draft_interview_prep
-from app.models import (
-    Application,
-    AssistantRun,
-    AssistantRunKind,
-    Document,
-    DocumentKind,
-    JobPosting,
-)
+from app.models import Application, AssistantRun, AssistantRunKind, JobPosting
+from app.resumes import find_resume
 from app.schemas import (
     AssistantRunRead,
     CoverLetterRequest,
@@ -141,8 +135,14 @@ async def _context(
 async def _resolve_resume(
     db: AsyncSession, application_id: uuid.UUID, resume_document_id: uuid.UUID | None
 ) -> str | None:
+    document = await find_resume(db, application_id, resume_document_id)
+
     if resume_document_id:
-        document = await get_or_404(db, Document, resume_document_id)
+        if document is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Document {resume_document_id} not found",
+            )
         if not document.extracted_text:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -151,28 +151,7 @@ async def _resolve_resume(
                     "Upload a PDF, .txt or .md version."
                 ),
             )
-        return document.extracted_text
 
-    # Otherwise: the newest resume attached to this application, else the newest
-    # unattached resume, so a single stored resume just works.
-    result = await db.execute(
-        select(Document)
-        .where(
-            Document.kind == DocumentKind.resume,
-            Document.extracted_text.isnot(None),
-            or_(
-                Document.application_id == application_id,
-                Document.application_id.is_(None),
-            ),
-        )
-        .order_by(
-            # Prefer one attached to this application.
-            (Document.application_id == application_id).desc(),
-            Document.created_at.desc(),
-        )
-        .limit(1)
-    )
-    document = result.scalar_one_or_none()
     return document.extracted_text if document else None
 
 

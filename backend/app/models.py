@@ -3,15 +3,18 @@ import uuid
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     Enum,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -42,7 +45,11 @@ class RemoteType(enum.StrEnum):
 
 
 class DocumentKind(enum.StrEnum):
-    resume = "resume"
+    # A master resume. One of these is marked `is_base` and is what tailored
+    # resumes are written from, and what an application falls back to.
+    base_resume = "base_resume"
+    # A resume tailored from a base resume for one application.
+    tailored_resume = "tailored_resume"
     cover_letter = "cover_letter"
     portfolio = "portfolio"
     offer_letter = "offer_letter"
@@ -176,6 +183,12 @@ class Document(Base):
     kind: Mapped[DocumentKind] = mapped_column(
         Enum(DocumentKind, name="document_kind"), default=DocumentKind.other, nullable=False
     )
+    # The one base resume to tailor from. A partial unique index keeps it single.
+    is_base: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # For a tailored resume: the base resume it was written from.
+    derived_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), index=True
+    )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -188,6 +201,16 @@ class Document(Base):
     )
 
     application: Mapped[Application | None] = relationship(back_populates="documents")
+    derived_from: Mapped["Document | None"] = relationship(remote_side=lambda: [Document.id])
+
+    __table_args__ = (
+        Index(
+            "uq_documents_single_base",
+            "is_base",
+            unique=True,
+            postgresql_where=text("is_base"),
+        ),
+    )
 
 
 class AssistantRun(Base):
