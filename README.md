@@ -44,6 +44,25 @@ When something needs "the resume" for an application it resolves, in order: a
 resume you named explicitly, the tailored resume for that application, the
 designated base resume, then the most recent base resume.
 
+### File formats
+
+PDF, Word (`.docx`), plain text, markdown and HTML uploads are all read for
+their text, which is what the match rating and the assistant work from. Word
+files laid out in tables — a very common resume pattern — are read from the
+table cells too, not just the paragraphs. Legacy `.doc` is a different binary
+format: the file stores and downloads fine, but nothing can read it, and the
+Documents page flags it as "No text".
+
+### Exporting
+
+Anything the assistant generates — cover letter, interview prep, match
+analysis — exports to **Word or PDF** from the buttons on the result. Both
+formats render from one parsed block model, so they are structurally identical
+rather than two separate best-efforts, and the on-screen preview uses the same
+markup rules. Exports are filed under Documents against the application, named
+with the role so a day of exporting doesn't produce a folder of identical
+filenames.
+
 ## Match rating (no AI)
 
 Every application gets a 0-100 rating computed from the posting text and your

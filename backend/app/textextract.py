@@ -11,6 +11,7 @@ from selectolax.parser import HTMLParser
 logger = logging.getLogger(__name__)
 
 MAX_FETCH_BYTES = 5 * 1024 * 1024
+DOCX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _WS = re.compile(r"\n{3,}")
 
 
@@ -62,8 +63,35 @@ async def extract_document_text(data: bytes, content_type: str, filename: str) -
     if "html" in content_type or lowered.endswith((".html", ".htm")):
         return html_to_text(data.decode("utf-8", errors="replace"))
 
-    # .docx and friends would need another dependency; store the file, skip the text.
+    if lowered.endswith(".docx") or content_type == DOCX_MEDIA_TYPE:
+        return await run_in_threadpool(_docx_to_text, data)
+
+    # Legacy .doc is a different, binary format -- store the file, skip the text.
     return None
+
+
+def _docx_to_text(data: bytes) -> str | None:
+    """Plain text from a .docx, including text laid out in tables.
+
+    Walking `document.paragraphs` alone misses table cells, and plenty of
+    resumes put their whole layout in an invisible table -- which would look
+    like an empty resume to the matcher.
+    """
+    try:
+        from docx import Document as DocxDocument
+
+        document = DocxDocument(io.BytesIO(data))
+        blocks = [p.text for p in document.paragraphs]
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    blocks.extend(p.text for p in cell.paragraphs)
+
+        text = _collapse("\n".join(block for block in blocks if block.strip()))
+        return text if len(text) > 40 else None
+    except Exception:
+        logger.warning("DOCX text extraction failed", exc_info=True)
+        return None
 
 
 def _pdf_to_text(data: bytes) -> str | None:

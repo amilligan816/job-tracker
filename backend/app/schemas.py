@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
@@ -202,6 +203,11 @@ class DocumentRead(ORMModel):
 class DocumentDownload(BaseModel):
     url: str
     expires_in: int
+
+
+class ExportFormat(StrEnum):
+    docx = "docx"
+    pdf = "pdf"
 
 
 # ----------------------------------------------------------------------- match rating

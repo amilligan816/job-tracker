@@ -199,6 +199,8 @@ export interface AssistantRun {
   created_at: string;
 }
 
+export type ExportFormat = "docx" | "pdf";
+
 export interface AssistantStatus {
   enabled: boolean;
   model: string;

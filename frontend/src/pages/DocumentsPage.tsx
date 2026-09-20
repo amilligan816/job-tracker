@@ -96,7 +96,8 @@ export default function DocumentsPage() {
         <Typography variant="h4">Documents</Typography>
         <Typography color="text.secondary">
           Keep one base resume as your master. Tailor it per application, and the match rating
-          scores each application against its tailored resume when one exists.
+          scores each application against its tailored resume when one exists. PDF, Word (.docx),
+          text and markdown are all read for their contents.
         </Typography>
       </div>
 
@@ -170,6 +171,7 @@ export default function DocumentsPage() {
                 ref={fileInput}
                 type="file"
                 hidden
+                accept=".pdf,.docx,.txt,.md,.html,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown,text/html"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   if (file) upload.mutate(file);

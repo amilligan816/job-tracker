@@ -7,6 +7,7 @@ import type {
   AssistantStatus,
   Company,
   DocumentKind,
+  ExportFormat,
   JobPosting,
   PipelineSummary,
   PostingMatch,
@@ -148,6 +149,11 @@ export const api = {
     status: () => request<AssistantStatus>("/assistant/status"),
     runs: (applicationId?: string) =>
       request<AssistantRun[]>(`/assistant/runs${qs({ application_id: applicationId })}`),
+    /** Renders a run to Word or PDF and files it under Documents. */
+    exportRun: (runId: string, format: ExportFormat) =>
+      request<StoredDocument>(`/assistant/runs/${runId}/export${qs({ format })}`, {
+        method: "POST",
+      }),
     matchAnalysis: (body: { application_id: string; resume_document_id?: string }) =>
       request<AssistantRun>("/assistant/match-analysis", {
         method: "POST",

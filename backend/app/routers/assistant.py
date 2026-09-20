@@ -1,19 +1,38 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app import storage
 from app.config import get_settings
 from app.crud import get_or_404
 from app.db import get_db
 from app.llm import analyze_match, draft_cover_letter, draft_interview_prep
-from app.models import Application, AssistantRun, AssistantRunKind, JobPosting
+from app.models import (
+    Application,
+    AssistantRun,
+    AssistantRunKind,
+    Document,
+    DocumentKind,
+    JobPosting,
+)
+from app.render import (
+    DOCX_MEDIA_TYPE,
+    PDF_MEDIA_TYPE,
+    default_filename,
+    parse_blocks,
+    to_docx,
+    to_pdf,
+)
 from app.resumes import find_resume
 from app.schemas import (
     AssistantRunRead,
     CoverLetterRequest,
+    DocumentRead,
+    ExportFormat,
     InterviewPrepRequest,
     MatchAnalysisRequest,
 )
@@ -99,6 +118,127 @@ async def list_runs(
 @router.get("/runs/{run_id}", response_model=AssistantRunRead)
 async def get_run(run_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     return await get_or_404(db, AssistantRun, run_id)
+
+
+@router.post("/runs/{run_id}/export", response_model=DocumentRead)
+async def export_run(
+    run_id: uuid.UUID,
+    export_format: ExportFormat = Query(alias="format", description="docx or pdf"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Render a generated document to Word or PDF and file it under Documents.
+
+    It goes through the normal document store, so it is downloadable, attached
+    to the application, and searchable alongside everything else.
+    """
+    run = await get_or_404(db, AssistantRun, run_id)
+    title, subtitle, body = _run_as_document(run, await _company_for(db, run.application_id))
+
+    if not body.strip():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This run has no content to export",
+        )
+
+    blocks = parse_blocks(body)
+    if export_format is ExportFormat.docx:
+        data = await run_in_threadpool(to_docx, title, blocks, subtitle)
+        media_type = DOCX_MEDIA_TYPE
+    else:
+        data = await run_in_threadpool(to_pdf, title, blocks, subtitle)
+        media_type = PDF_MEDIA_TYPE
+
+    filename = default_filename(title, export_format.value, subtitle)
+    kind = (
+        DocumentKind.cover_letter
+        if run.kind is AssistantRunKind.cover_letter
+        else DocumentKind.other
+    )
+    key = storage.build_key(kind.value, filename)
+    await storage.put_object(key, data, media_type)
+
+    document = Document(
+        application_id=run.application_id,
+        kind=kind,
+        filename=filename,
+        content_type=media_type,
+        size_bytes=len(data),
+        storage_key=key,
+        # Keep the source text, so an exported document still feeds the matcher
+        # and the assistant without re-parsing the rendered file.
+        extracted_text=body,
+    )
+    db.add(document)
+    try:
+        await db.flush()
+    except Exception:
+        await storage.delete_object(key)
+        raise
+    await db.refresh(document)
+    document.has_text = True
+    return document
+
+
+# --------------------------------------------------------------------------- export
+
+
+async def _company_for(db: AsyncSession, application_id: uuid.UUID | None) -> str | None:
+    if application_id is None:
+        return None
+    result = await db.execute(
+        select(Application)
+        .options(selectinload(Application.posting).selectinload(JobPosting.company))
+        .where(Application.id == application_id)
+    )
+    application = result.scalar_one_or_none()
+    if application is None or application.posting is None:
+        return None
+    company = application.posting.company.name if application.posting.company else None
+    return f"{application.posting.title} at {company}" if company else application.posting.title
+
+
+def _run_as_document(run: AssistantRun, role: str | None) -> tuple[str, str | None, str]:
+    """Title, subtitle and body text for a run, whatever shape it was stored in."""
+    titles = {
+        AssistantRunKind.cover_letter: "Cover letter",
+        AssistantRunKind.interview_prep: "Interview prep",
+        AssistantRunKind.match_analysis: "Match analysis",
+    }
+    title = titles[run.kind]
+    subtitle = role
+
+    if run.kind is AssistantRunKind.match_analysis and run.output_json:
+        return title, subtitle, _match_analysis_markdown(run.output_json)
+    return title, subtitle, run.output_text or ""
+
+
+def _match_analysis_markdown(analysis: dict) -> str:
+    """The structured analysis, laid out as a readable document."""
+    lines = [
+        f"**Overall fit:** {analysis.get('overall_fit', '?')}/100",
+        "",
+        analysis.get("summary", ""),
+    ]
+
+    def section(heading: str, items: list) -> None:
+        if items:
+            lines.extend(["", f"## {heading}", ""])
+            lines.extend(f"- {item}" for item in items)
+
+    section("Strengths", analysis.get("strengths") or [])
+
+    gaps = analysis.get("gaps") or []
+    if gaps:
+        lines.extend(["", "## Gaps", ""])
+        for gap in gaps:
+            evidence = f" — {gap['evidence']}" if gap.get("evidence") else ""
+            lines.append(
+                f"- **{gap.get('severity', 'gap')}:** {gap.get('requirement', '')}{evidence}"
+            )
+
+    section("Resume suggestions", analysis.get("resume_suggestions") or [])
+    section("Talking points", analysis.get("talking_points") or [])
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- helpers

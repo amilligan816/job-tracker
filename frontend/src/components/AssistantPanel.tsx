@@ -13,13 +13,17 @@ import {
 } from "@mui/material";
 import AutoAwesomeIcon from "@mui/icons-material/AutoAwesome";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import DescriptionIcon from "@mui/icons-material/Description";
+import PictureAsPdfIcon from "@mui/icons-material/PictureAsPdf";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { api } from "../api/client";
+import MarkdownText from "./MarkdownText";
 import {
   DOCUMENT_KIND_LABELS,
   type AssistantRun,
+  type ExportFormat,
   type MatchAnalysis,
   type StoredDocument,
 } from "../api/types";
@@ -60,17 +64,26 @@ export default function AssistantPanel({
       queryClient.invalidateQueries({ queryKey: ["assistant-runs", applicationId] }),
   });
 
-  if (status.data && !status.data.enabled) {
+  // When the assistant is off, the generate controls go away but anything
+  // already generated stays readable and exportable.
+  const enabled = status.data?.enabled ?? true;
+
+  if (!enabled) {
     return (
       <Card>
         <CardContent>
           <Typography variant="h6" gutterBottom>
             Assistant
           </Typography>
-          <Alert severity="info">
+          <Alert severity="info" sx={{ mb: runs.data?.length ? 2 : 0 }}>
             Set <code>ANTHROPIC_API_KEY</code> in <code>.env</code> and restart the backend to
             enable match analysis, cover letters and interview prep.
           </Alert>
+          <Stack spacing={2}>
+            {runs.data?.map((item) => (
+              <RunResult key={item.id} run={item} />
+            ))}
+          </Stack>
         </CardContent>
       </Card>
     );
@@ -155,6 +168,21 @@ export default function AssistantPanel({
 }
 
 function RunResult({ run }: { run: AssistantRun }) {
+  const queryClient = useQueryClient();
+  const [exported, setExported] = useState<string | null>(null);
+
+  const exportRun = useMutation({
+    mutationFn: (format: ExportFormat) => api.assistant.exportRun(run.id, format),
+    onSuccess: async (document) => {
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      queryClient.invalidateQueries({ queryKey: ["application"] });
+      setExported(document.filename);
+      // Hand the file straight over rather than making them hunt for it.
+      const { url } = await api.documents.downloadUrl(document.id);
+      window.open(url, "_blank", "noopener");
+    },
+  });
+
   const title =
     run.kind === "match_analysis"
       ? "Match analysis"
@@ -180,19 +208,40 @@ function RunResult({ run }: { run: AssistantRun }) {
                 Copy
               </Button>
             )}
+            <Button
+              size="small"
+              startIcon={<DescriptionIcon fontSize="small" />}
+              disabled={exportRun.isPending}
+              onClick={() => exportRun.mutate("docx")}
+            >
+              Word
+            </Button>
+            <Button
+              size="small"
+              startIcon={<PictureAsPdfIcon fontSize="small" />}
+              disabled={exportRun.isPending}
+              onClick={() => exportRun.mutate("pdf")}
+            >
+              PDF
+            </Button>
           </Stack>
         </Stack>
+
+        {exportRun.error && (
+          <Alert severity="error" sx={{ mb: 1 }}>
+            {(exportRun.error as Error).message}
+          </Alert>
+        )}
+        {exported && (
+          <Alert severity="success" sx={{ mb: 1 }} onClose={() => setExported(null)}>
+            Saved <strong>{exported}</strong> to Documents.
+          </Alert>
+        )}
 
         {run.output_json ? (
           <MatchAnalysisView analysis={run.output_json} />
         ) : (
-          <Typography
-            variant="body2"
-            component="pre"
-            sx={{ whiteSpace: "pre-wrap", fontFamily: "inherit", m: 0 }}
-          >
-            {run.output_text}
-          </Typography>
+          <MarkdownText text={run.output_text ?? ""} />
         )}
       </CardContent>
     </Card>
