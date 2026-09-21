@@ -10,6 +10,7 @@ from app import storage
 from app.config import get_settings
 from app.crud import get_or_404
 from app.db import get_db
+from app.experience import profile_text
 from app.llm import analyze_match, draft_cover_letter, draft_interview_prep
 from app.models import (
     Application,
@@ -27,7 +28,6 @@ from app.render import (
     to_docx,
     to_pdf,
 )
-from app.resumes import find_resume
 from app.schemas import (
     AssistantRunRead,
     CoverLetterRequest,
@@ -48,9 +48,7 @@ async def assistant_status():
 
 @router.post("/match-analysis", response_model=AssistantRunRead)
 async def match_analysis(payload: MatchAnalysisRequest, db: AsyncSession = Depends(get_db)):
-    application, posting_text, resume_text, _company = await _context(
-        db, payload.application_id, payload.resume_document_id
-    )
+    application, posting_text, resume_text, _company = await _context(db, payload.application_id)
     analysis, usage = await analyze_match(posting_text, resume_text)
 
     return await _record(
@@ -59,15 +57,13 @@ async def match_analysis(payload: MatchAnalysisRequest, db: AsyncSession = Depen
         kind=AssistantRunKind.match_analysis,
         output_json=analysis.model_dump(mode="json"),
         usage=usage,
-        context={"resume_document_id": str(payload.resume_document_id or "")},
+        context={"grounded_in": "experience record"},
     )
 
 
 @router.post("/cover-letter", response_model=AssistantRunRead)
 async def cover_letter(payload: CoverLetterRequest, db: AsyncSession = Depends(get_db)):
-    application, posting_text, resume_text, company = await _context(
-        db, payload.application_id, payload.resume_document_id
-    )
+    application, posting_text, resume_text, company = await _context(db, payload.application_id)
     text, usage = await draft_cover_letter(
         posting_text, resume_text, company, payload.tone, payload.emphasis
     )
@@ -84,9 +80,7 @@ async def cover_letter(payload: CoverLetterRequest, db: AsyncSession = Depends(g
 
 @router.post("/interview-prep", response_model=AssistantRunRead)
 async def interview_prep(payload: InterviewPrepRequest, db: AsyncSession = Depends(get_db)):
-    application, posting_text, resume_text, company = await _context(
-        db, payload.application_id, payload.resume_document_id
-    )
+    application, posting_text, resume_text, company = await _context(db, payload.application_id)
     text, usage = await draft_interview_prep(posting_text, resume_text, company, payload.round_type)
 
     return await _record(
@@ -245,9 +239,13 @@ def _match_analysis_markdown(analysis: dict) -> str:
 
 
 async def _context(
-    db: AsyncSession, application_id: uuid.UUID, resume_document_id: uuid.UUID | None
+    db: AsyncSession, application_id: uuid.UUID
 ) -> tuple[Application, str, str | None, str | None]:
-    """Assemble posting text, resume text, and company name for one application."""
+    """Assemble posting text, experience text, and company name for one application.
+
+    The experience record here includes stories -- the depth that makes a cover
+    letter specific is exactly what the matcher leaves out.
+    """
     result = await db.execute(
         select(Application)
         .options(selectinload(Application.posting).selectinload(JobPosting.company))
@@ -267,32 +265,9 @@ async def _context(
             detail="This posting has no description stored -- capture or paste one first",
         )
 
-    resume = await _resolve_resume(db, application_id, resume_document_id)
+    resume = await profile_text(db)
     company = posting.company.name if posting.company else None
     return application, posting_text, resume, company
-
-
-async def _resolve_resume(
-    db: AsyncSession, application_id: uuid.UUID, resume_document_id: uuid.UUID | None
-) -> str | None:
-    document = await find_resume(db, application_id, resume_document_id)
-
-    if resume_document_id:
-        if document is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Document {resume_document_id} not found",
-            )
-        if not document.extracted_text:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"No readable text was extracted from {document.filename!r}. "
-                    "Upload a PDF, .txt or .md version."
-                ),
-            )
-
-    return document.extracted_text if document else None
 
 
 def _posting_digest(posting: JobPosting) -> str:

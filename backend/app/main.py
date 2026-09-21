@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.llm import AssistantUnavailable
-from app.routers import applications, assistant, companies, documents, postings
+from app.routers import applications, assistant, companies, documents, experience, postings
 from app.storage import ensure_bucket
 
 settings = get_settings()
@@ -60,6 +60,7 @@ for router in (
     postings.router,
     applications.router,
     documents.router,
+    experience.router,
     assistant.router,
 ):
     app.include_router(router, prefix="/api")

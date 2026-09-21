@@ -21,6 +21,7 @@ import { Link as RouterLink, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import { APPLICATION_STATUSES, type ApplicationStatus } from "../api/types";
 import AssistantPanel from "../components/AssistantPanel";
+import ApplicationFiles from "../components/ApplicationFiles";
 import MatchCard from "../components/MatchCard";
 import QueryState from "../components/QueryState";
 import StatusChip from "../components/StatusChip";
@@ -202,7 +203,7 @@ export default function ApplicationDetailPage() {
 
                   {data.posting?.extracted && <PostingFacts extracted={data.posting.extracted} />}
 
-                  <AssistantPanel applicationId={id} documents={data.documents} />
+                  <AssistantPanel applicationId={id} />
                 </Stack>
               </Grid>
 
@@ -252,40 +253,7 @@ export default function ApplicationDetailPage() {
                     </CardContent>
                   </Card>
 
-                  <Card>
-                    <CardContent>
-                      <Typography variant="h6" gutterBottom>
-                        Documents
-                      </Typography>
-                      {data.documents.length === 0 ? (
-                        <Typography variant="body2" color="text.secondary">
-                          None attached. Upload one from the Documents page.
-                        </Typography>
-                      ) : (
-                        <Stack spacing={1}>
-                          {data.documents.map((doc) => (
-                            <Stack
-                              key={doc.id}
-                              direction="row"
-                              justifyContent="space-between"
-                              alignItems="center"
-                            >
-                              <Typography variant="body2">{doc.filename}</Typography>
-                              <Button
-                                size="small"
-                                onClick={async () => {
-                                  const { url } = await api.documents.downloadUrl(doc.id);
-                                  window.open(url, "_blank", "noopener");
-                                }}
-                              >
-                                Download
-                              </Button>
-                            </Stack>
-                          ))}
-                        </Stack>
-                      )}
-                    </CardContent>
-                  </Card>
+                  <ApplicationFiles applicationId={id} documents={data.documents} />
                 </Stack>
               </Grid>
             </Grid>

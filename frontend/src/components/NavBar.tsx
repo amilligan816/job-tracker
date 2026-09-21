@@ -6,8 +6,8 @@ const LINKS = [
   { to: "/", label: "Dashboard" },
   { to: "/applications", label: "Applications" },
   { to: "/capture", label: "Capture" },
+  { to: "/experience", label: "Experience" },
   { to: "/companies", label: "Companies" },
-  { to: "/documents", label: "Documents" },
 ];
 
 export default function NavBar() {

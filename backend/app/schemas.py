@@ -8,8 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from app.models import (
     ApplicationStatus,
     AssistantRunKind,
+    ChatRole,
     DocumentKind,
     EventKind,
+    ExperienceSource,
     RemoteType,
 )
 
@@ -192,17 +194,229 @@ class DocumentRead(ORMModel):
     size_bytes: int
     storage_key: str
     created_at: datetime
-    # True for the one base resume that tailored resumes are written from.
-    is_base: bool = False
-    # For a tailored resume: the base resume it came from.
-    derived_from_id: uuid.UUID | None = None
-    # Whether plain text could be read out of it; the matcher needs this.
+    # Whether plain text could be read out of it.
     has_text: bool = False
 
 
 class DocumentDownload(BaseModel):
     url: str
     expires_in: int
+
+
+# --------------------------------------------------------------------------- experience
+
+
+class HighlightBase(BaseModel):
+    text: str = Field(min_length=1)
+    sort_order: int = 0
+
+
+class HighlightCreate(HighlightBase):
+    pass
+
+
+class HighlightUpdate(BaseModel):
+    text: str | None = Field(default=None, min_length=1)
+    sort_order: int | None = None
+
+
+class HighlightRead(ORMModel, HighlightBase):
+    id: uuid.UUID
+    source: ExperienceSource
+
+
+class RoleBase(BaseModel):
+    company: str = Field(min_length=1, max_length=255)
+    title: str = Field(min_length=1, max_length=255)
+    location: str | None = None
+    employment_type: str | None = None
+    start_date: date | None = None
+    # Null means current.
+    end_date: date | None = None
+    summary: str | None = None
+    sort_order: int = 0
+
+
+class RoleCreate(RoleBase):
+    highlights: list[HighlightCreate] = Field(default_factory=list)
+
+
+class RoleUpdate(BaseModel):
+    company: str | None = Field(default=None, min_length=1)
+    title: str | None = Field(default=None, min_length=1)
+    location: str | None = None
+    employment_type: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    summary: str | None = None
+    sort_order: int | None = None
+
+
+class RoleRead(ORMModel, RoleBase):
+    id: uuid.UUID
+    source: ExperienceSource
+    highlights: list[HighlightRead] = Field(default_factory=list)
+
+
+class StoryBase(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    body: str = Field(min_length=1)
+    role_id: uuid.UUID | None = None
+    skills: list[str] = Field(default_factory=list)
+
+
+class StoryCreate(StoryBase):
+    source: ExperienceSource = ExperienceSource.manual
+
+
+class StoryUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1)
+    body: str | None = Field(default=None, min_length=1)
+    role_id: uuid.UUID | None = None
+    skills: list[str] | None = None
+
+
+class StoryRead(ORMModel, StoryBase):
+    id: uuid.UUID
+    source: ExperienceSource
+    created_at: datetime
+
+
+class EducationBase(BaseModel):
+    institution: str = Field(min_length=1, max_length=255)
+    credential: str | None = None
+    field: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    notes: str | None = None
+    sort_order: int = 0
+
+
+class EducationCreate(EducationBase):
+    pass
+
+
+class EducationUpdate(BaseModel):
+    institution: str | None = Field(default=None, min_length=1)
+    credential: str | None = None
+    field: str | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    notes: str | None = None
+    sort_order: int | None = None
+
+
+class EducationRead(ORMModel, EducationBase):
+    id: uuid.UUID
+
+
+class ProfileLink(BaseModel):
+    label: str
+    url: str
+
+
+class ProfileUpdate(BaseModel):
+    full_name: str | None = None
+    headline: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    links: list[ProfileLink] | None = None
+    summary: str | None = None
+    skills: list[str] | None = None
+
+
+class ProfileRead(ORMModel):
+    id: uuid.UUID
+    full_name: str | None = None
+    headline: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    links: list[ProfileLink] = Field(default_factory=list)
+    summary: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    roles: list[RoleRead] = Field(default_factory=list)
+    stories: list[StoryRead] = Field(default_factory=list)
+    education: list[EducationRead] = Field(default_factory=list)
+    created_at: datetime
+    updated_at: datetime
+    # True when there is nothing to score or write from yet.
+    is_empty: bool = False
+
+
+class ImportedExperience(BaseModel):
+    """What the model pulls out of an uploaded resume, for the user to review."""
+
+    full_name: str | None = None
+    headline: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    location: str | None = None
+    summary: str | None = None
+    skills: list[str] = Field(default_factory=list)
+    roles: list[RoleCreate] = Field(default_factory=list)
+    education: list[EducationCreate] = Field(default_factory=list)
+
+
+class ChatMessageRead(ORMModel):
+    id: uuid.UUID
+    role: ChatRole
+    content: str
+    created_at: datetime
+
+
+class ChatTurnRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=8000)
+
+
+class ProposedStory(BaseModel):
+    """A story the interview suggests recording, pending the user's approval."""
+
+    title: str
+    body: str
+    role_id: uuid.UUID | None = None
+    skills: list[str] = Field(default_factory=list)
+
+
+class ChatTurnResult(BaseModel):
+    """What the model returns for one interview turn."""
+
+    reply: str
+    proposed_stories: list[ProposedStory] = Field(default_factory=list)
+
+
+class ChatTurnResponse(BaseModel):
+    reply: ChatMessageRead
+    proposed_stories: list[ProposedStory] = Field(default_factory=list)
+
+
+# ----------------------------------------------------------------------- resume build
+
+
+class ResumeTemplateBase(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+    sections: list[str] = Field(
+        default_factory=lambda: ["summary", "skills", "experience", "education"]
+    )
+    options: dict = Field(default_factory=dict)
+
+
+class ResumeTemplateCreate(ResumeTemplateBase):
+    is_default: bool = False
+
+
+class ResumeTemplateRead(ORMModel, ResumeTemplateBase):
+    id: uuid.UUID
+    is_default: bool
+
+
+class ResumeBuildRequest(BaseModel):
+    application_id: uuid.UUID
+    template_id: uuid.UUID | None = None
+    export_format: "ExportFormat | None" = None
+    # Off by default: a plain render of the record needs no model call.
+    tailor: bool = True
 
 
 class ExportFormat(StrEnum):
@@ -234,7 +448,6 @@ class PostingMatch(BaseModel):
     required_years: int | None = None
     resume_years: int | None = None
     years_basis: str | None = None
-    resume_document_id: uuid.UUID | None = None
 
 
 # --------------------------------------------------------------------------- assistant
@@ -242,7 +455,6 @@ class PostingMatch(BaseModel):
 
 class MatchAnalysisRequest(BaseModel):
     application_id: uuid.UUID
-    resume_document_id: uuid.UUID | None = None
 
 
 class MatchGap(BaseModel):
@@ -262,14 +474,12 @@ class MatchAnalysis(BaseModel):
 
 class CoverLetterRequest(BaseModel):
     application_id: uuid.UUID
-    resume_document_id: uuid.UUID | None = None
     tone: str = Field(default="professional and direct", max_length=128)
     emphasis: str | None = Field(default=None, max_length=1024)
 
 
 class InterviewPrepRequest(BaseModel):
     application_id: uuid.UUID
-    resume_document_id: uuid.UUID | None = None
     round_type: str = Field(default="recruiter screen", max_length=128)
 
 
@@ -295,3 +505,6 @@ class PipelineSummary(BaseModel):
 
 
 ApplicationDetail.model_rebuild()
+
+
+ResumeBuildRequest.model_rebuild()

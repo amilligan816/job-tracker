@@ -14,8 +14,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision = 'c3f901b8828b'
-down_revision = 'bdae58f29f2e'
+revision = "c3f901b8828b"
+down_revision = "bdae58f29f2e"
 branch_labels = None
 depends_on = None
 
@@ -37,8 +37,7 @@ def _swap_enum(new_values, mapping_sql, old_name="document_kind"):
     op.execute(f"CREATE TYPE {old_name} AS ENUM ({values})")
     op.execute("ALTER TABLE documents ALTER COLUMN kind DROP DEFAULT")
     op.execute(
-        f"ALTER TABLE documents ALTER COLUMN kind TYPE {old_name} "
-        f"USING ({mapping_sql})::{old_name}"
+        f"ALTER TABLE documents ALTER COLUMN kind TYPE {old_name} USING ({mapping_sql})::{old_name}"
     )
     op.execute(f"DROP TYPE {old_name}_old")
 

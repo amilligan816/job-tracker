@@ -6,7 +6,6 @@ import {
   CardContent,
   Chip,
   LinearProgress,
-  MenuItem,
   Stack,
   TextField,
   Typography,
@@ -20,24 +19,11 @@ import { useState } from "react";
 
 import { api } from "../api/client";
 import MarkdownText from "./MarkdownText";
-import {
-  DOCUMENT_KIND_LABELS,
-  type AssistantRun,
-  type ExportFormat,
-  type MatchAnalysis,
-  type StoredDocument,
-} from "../api/types";
+import type { AssistantRun, ExportFormat, MatchAnalysis } from "../api/types";
 
 type Kind = "match_analysis" | "cover_letter" | "interview_prep";
 
-export default function AssistantPanel({
-  applicationId,
-  documents,
-}: {
-  applicationId: string;
-  documents: StoredDocument[];
-}) {
-  const [resumeId, setResumeId] = useState("");
+export default function AssistantPanel({ applicationId }: { applicationId: string }) {
   const [tone, setTone] = useState("professional and direct");
   const [roundType, setRoundType] = useState("recruiter screen");
   const queryClient = useQueryClient();
@@ -48,14 +34,9 @@ export default function AssistantPanel({
     queryFn: () => api.assistant.runs(applicationId),
   });
 
-  // Tailored first: that is what would actually be sent for this application.
-  const resumes = documents
-    .filter((d) => d.kind === "tailored_resume" || d.kind === "base_resume")
-    .sort((a, b) => Number(b.kind === "tailored_resume") - Number(a.kind === "tailored_resume"));
-
   const run = useMutation({
     mutationFn: (kind: Kind) => {
-      const base = { application_id: applicationId, resume_document_id: resumeId || undefined };
+      const base = { application_id: applicationId };
       if (kind === "match_analysis") return api.assistant.matchAnalysis(base);
       if (kind === "cover_letter") return api.assistant.coverLetter({ ...base, tone });
       return api.assistant.interviewPrep({ ...base, round_type: roundType });
@@ -99,26 +80,6 @@ export default function AssistantPanel({
         </Stack>
 
         <Stack spacing={2}>
-          <TextField
-            select
-            size="small"
-            label="Resume"
-            value={resumeId}
-            onChange={(e) => setResumeId(e.target.value)}
-            helperText={
-              resumes.length
-                ? "Which resume to compare against."
-                : "None attached — the tailored resume, else your base resume, is used."
-            }
-          >
-            <MenuItem value="">Tailored, else base resume</MenuItem>
-            {resumes.map((doc) => (
-              <MenuItem key={doc.id} value={doc.id}>
-                {doc.filename} — {DOCUMENT_KIND_LABELS[doc.kind]}
-              </MenuItem>
-            ))}
-          </TextField>
-
           <Stack direction={{ xs: "column", sm: "row" }} spacing={1}>
             <TextField
               size="small"

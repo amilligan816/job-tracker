@@ -8,17 +8,15 @@ from sqlalchemy.orm import selectinload
 
 from app.crud import apply_updates, get_or_404
 from app.db import get_db
+from app.experience import profile_text
 from app.matching import rate_match
 from app.models import (
     Application,
     ApplicationEvent,
     ApplicationStatus,
-    Document,
-    DocumentKind,
     EventKind,
     JobPosting,
 )
-from app.resumes import find_resume
 from app.schemas import (
     ApplicationCreate,
     ApplicationDetail,
@@ -155,15 +153,12 @@ async def delete_application(application_id: uuid.UUID, db: AsyncSession = Depen
 async def match_rating(
     application_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    resume_document_id: uuid.UUID | None = Query(
-        default=None, description="Defaults to the most relevant stored resume"
-    ),
 ):
-    """Rate this application's posting against a resume.
+    """Rate this application's posting against the experience record.
 
     Pure string matching over a skill vocabulary -- no model call, so it is free,
-    instant and gives the same answer every time. A `score` of null means there
-    is no resume, or the posting names too few recognisable skills to rate.
+    instant and gives the same answer every time. A `score` of null means the
+    experience record is empty, or the posting names too few recognisable skills.
     """
     result = await db.execute(
         select(Application)
@@ -176,18 +171,15 @@ async def match_rating(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Application {application_id} not found"
         )
 
-    resume = await find_resume(db, application_id, resume_document_id)
-    if resume_document_id and resume is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Document {resume_document_id} not found",
-        )
+    # Stories are excluded: their skills already appear in the role bullets, and
+    # their length would inflate the term count without adding evidence.
+    resume_text = await profile_text(db, include_stories=False)
 
     posting = application.posting
     rated = rate_match(
         posting_raw_text=posting.raw_text if posting else None,
         posting_extracted=posting.extracted if posting else None,
-        resume_text=resume.extracted_text if resume else None,
+        resume_text=resume_text,
     )
     return PostingMatch(
         score=rated.score,
@@ -201,34 +193,26 @@ async def match_rating(
         required_years=rated.required_years,
         resume_years=rated.resume_years,
         years_basis=rated.years_basis,
-        resume_document_id=resume.id if resume else None,
     )
 
 
 async def _attach_match_scores(db: AsyncSession, applications: list[Application]) -> None:
-    """Rate a page of applications.
+    """Rate a page of applications against the experience record.
 
-    Resolves the same resume per row that `/{id}/match` would -- the tailored
-    resume when there is one, else the base -- but in two queries for the whole
-    page rather than one lookup per row, so the list cannot disagree with the
-    detail view.
+    One text for every row now -- there is a single record rather than a resume
+    to resolve per application, so the list and the detail view cannot disagree.
     """
     if not applications:
         return
 
-    base = await find_resume(db, None)
-    tailored = await _tailored_resume_text(db, [a.id for a in applications])
-
-    if base is None and not tailored:
+    resume_text = await profile_text(db, include_stories=False)
+    if resume_text is None:
         return
-
-    base_text = base.extracted_text if base else None
 
     for application in applications:
         posting = application.posting
         if posting is None:
             continue
-        resume_text = tailored.get(application.id) or base_text
         rated = rate_match(
             posting_raw_text=posting.raw_text,
             posting_extracted=posting.extracted,
@@ -238,29 +222,6 @@ async def _attach_match_scores(db: AsyncSession, applications: list[Application]
         # are not mapped columns, so nothing is written back to the database.
         application.match_score = rated.score
         application.match_rating = rated.rating
-
-
-async def _tailored_resume_text(
-    db: AsyncSession, application_ids: list[uuid.UUID]
-) -> dict[uuid.UUID, str]:
-    """Newest tailored resume text per application, in one query."""
-    if not application_ids:
-        return {}
-
-    result = await db.execute(
-        select(Document.application_id, Document.extracted_text)
-        .where(
-            Document.kind == DocumentKind.tailored_resume,
-            Document.application_id.in_(application_ids),
-            Document.extracted_text.isnot(None),
-        )
-        .order_by(Document.application_id, Document.created_at.desc())
-    )
-    newest: dict[uuid.UUID, str] = {}
-    for application_id, text in result.all():
-        # Ordered newest-first per application, so the first win stands.
-        newest.setdefault(application_id, text)
-    return newest
 
 
 # ---------------------------------------------------------------------------- events

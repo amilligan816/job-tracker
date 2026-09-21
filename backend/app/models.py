@@ -45,15 +45,31 @@ class RemoteType(enum.StrEnum):
 
 
 class DocumentKind(enum.StrEnum):
-    # A master resume. One of these is marked `is_base` and is what tailored
-    # resumes are written from, and what an application falls back to.
-    base_resume = "base_resume"
-    # A resume tailored from a base resume for one application.
-    tailored_resume = "tailored_resume"
+    """An artifact produced for, or attached to, one application.
+
+    Resumes are no longer stored as a master document -- they are generated from
+    the experience record and a template, so what lands here is the output.
+    """
+
+    resume = "resume"
     cover_letter = "cover_letter"
+    interview_prep = "interview_prep"
     portfolio = "portfolio"
     offer_letter = "offer_letter"
     other = "other"
+
+
+class ExperienceSource(enum.StrEnum):
+    """Where an experience item came from, so the UI can show provenance."""
+
+    imported = "imported"
+    manual = "manual"
+    chat = "chat"
+
+
+class ChatRole(enum.StrEnum):
+    user = "user"
+    assistant = "assistant"
 
 
 class EventKind(enum.StrEnum):
@@ -183,12 +199,6 @@ class Document(Base):
     kind: Mapped[DocumentKind] = mapped_column(
         Enum(DocumentKind, name="document_kind"), default=DocumentKind.other, nullable=False
     )
-    # The one base resume to tailor from. A partial unique index keeps it single.
-    is_base: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # For a tailored resume: the base resume it was written from.
-    derived_from_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("documents.id", ondelete="SET NULL"), index=True
-    )
     filename: Mapped[str] = mapped_column(String(512), nullable=False)
     content_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -201,14 +211,183 @@ class Document(Base):
     )
 
     application: Mapped[Application | None] = relationship(back_populates="documents")
-    derived_from: Mapped["Document | None"] = relationship(remote_side=lambda: [Document.id])
+
+
+class ExperienceProfile(TimestampMixin, Base):
+    """The candidate's professional record.
+
+    This replaces the stored base resume: a resume is rendered from here and a
+    template, rather than a file everything else points at. Single-user app, so
+    there is one row -- `get_or_create_profile` owns that.
+    """
+
+    __tablename__ = "experience_profiles"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    full_name: Mapped[str | None] = mapped_column(String(255))
+    headline: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255))
+    phone: Mapped[str | None] = mapped_column(String(64))
+    location: Mapped[str | None] = mapped_column(String(255))
+    # [{"label": "GitHub", "url": "..."}]
+    links: Mapped[list | None] = mapped_column(JSONB)
+    summary: Mapped[str | None] = mapped_column(Text)
+    # Free-form skill list the candidate claims, beyond what the roles imply.
+    skills: Mapped[list | None] = mapped_column(JSONB)
+
+    roles: Mapped[list["ExperienceRole"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="ExperienceRole.sort_order",
+    )
+    stories: Mapped[list["ExperienceStory"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="ExperienceStory.created_at.desc()",
+    )
+    education: Mapped[list["Education"]] = relationship(
+        back_populates="profile",
+        cascade="all, delete-orphan",
+        order_by="Education.sort_order",
+    )
+
+
+class ExperienceRole(Base):
+    __tablename__ = "experience_roles"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("experience_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    company: Mapped[str] = mapped_column(String(255), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    location: Mapped[str | None] = mapped_column(String(255))
+    employment_type: Mapped[str | None] = mapped_column(String(64))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    # Null means current.
+    end_date: Mapped[date | None] = mapped_column(Date)
+    summary: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source: Mapped[ExperienceSource] = mapped_column(
+        Enum(ExperienceSource, name="experience_source"),
+        default=ExperienceSource.manual,
+        nullable=False,
+    )
+
+    profile: Mapped[ExperienceProfile] = relationship(back_populates="roles")
+    highlights: Mapped[list["ExperienceHighlight"]] = relationship(
+        back_populates="role",
+        cascade="all, delete-orphan",
+        order_by="ExperienceHighlight.sort_order",
+    )
+    stories: Mapped[list["ExperienceStory"]] = relationship(back_populates="role")
+
+
+class ExperienceHighlight(Base):
+    """One achievement bullet. These are what a generated resume draws from."""
+
+    __tablename__ = "experience_highlights"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("experience_roles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    source: Mapped[ExperienceSource] = mapped_column(
+        Enum(ExperienceSource, name="experience_source"),
+        default=ExperienceSource.manual,
+        nullable=False,
+    )
+
+    role: Mapped[ExperienceRole] = relationship(back_populates="highlights")
+
+
+class ExperienceStory(Base):
+    """A deeper narrative than a resume bullet can hold.
+
+    This is what the chat is for: the detail behind an achievement that makes a
+    cover letter specific and an interview answer real.
+    """
+
+    __tablename__ = "experience_stories"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("experience_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("experience_roles.id", ondelete="SET NULL"), index=True
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    skills: Mapped[list | None] = mapped_column(JSONB)
+    source: Mapped[ExperienceSource] = mapped_column(
+        Enum(ExperienceSource, name="experience_source"),
+        default=ExperienceSource.chat,
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    profile: Mapped[ExperienceProfile] = relationship(back_populates="stories")
+    role: Mapped[ExperienceRole | None] = relationship(back_populates="stories")
+
+
+class Education(Base):
+    __tablename__ = "experience_education"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("experience_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    institution: Mapped[str] = mapped_column(String(255), nullable=False)
+    credential: Mapped[str | None] = mapped_column(String(255))
+    field: Mapped[str | None] = mapped_column(String(255))
+    start_date: Mapped[date | None] = mapped_column(Date)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    notes: Mapped[str | None] = mapped_column(Text)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    profile: Mapped[ExperienceProfile] = relationship(back_populates="education")
+
+
+class ExperienceMessage(Base):
+    """One turn of the experience interview."""
+
+    __tablename__ = "experience_messages"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("experience_profiles.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[ChatRole] = mapped_column(Enum(ChatRole, name="chat_role"), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ResumeTemplate(TimestampMixin, Base):
+    """How a generated resume is laid out."""
+
+    __tablename__ = "resume_templates"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Ordered section keys, e.g. ["summary", "skills", "experience", "education"].
+    sections: Mapped[list | None] = mapped_column(JSONB)
+    # Rendering knobs: heading style, date format, bullets per role, page limit.
+    options: Mapped[dict | None] = mapped_column(JSONB)
 
     __table_args__ = (
         Index(
-            "uq_documents_single_base",
-            "is_base",
+            "uq_resume_templates_single_default",
+            "is_default",
             unique=True,
-            postgresql_where=text("is_base"),
+            postgresql_where=text("is_default"),
         ),
     )
 

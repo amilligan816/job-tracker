@@ -13,7 +13,7 @@ from functools import lru_cache
 import anthropic
 
 from app.config import get_settings
-from app.schemas import ExtractedPosting, MatchAnalysis
+from app.schemas import ChatTurnResult, ExtractedPosting, ImportedExperience, MatchAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,90 @@ async def _generate(system: str, prompt: str, max_tokens: int = ANALYSIS_MAX_TOK
 
     _guard_refusal(response)
     return response
+
+
+# --------------------------------------------------------------- experience extraction
+
+_IMPORT_SYSTEM = """You convert a resume into structured career data.
+
+Rules:
+- Transcribe, do not embellish. Every role, date, and achievement must come
+  from the document. Never invent an employer, a metric, or a date.
+- Keep each highlight as one achievement, in the candidate's own words where
+  the resume already reads well.
+- Dates: use the first of the month when only a month and year are given.
+  Leave `end_date` null for a current role.
+- If the resume genuinely does not state something, leave it null or empty
+  rather than guessing."""
+
+
+async def extract_experience(resume_text: str) -> tuple[ImportedExperience, Usage]:
+    """Pull structured career data out of an uploaded resume for review."""
+    response = await _client().messages.parse(
+        model=_model(),
+        max_tokens=ANALYSIS_MAX_TOKENS,
+        system=_IMPORT_SYSTEM,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Extract the structured career data:\n\n{_clip(resume_text)}",
+            }
+        ],
+        output_format=ImportedExperience,
+    )
+    _guard_refusal(response)
+    return response.parsed_output, _usage(response)
+
+
+# ------------------------------------------------------------------ experience interview
+
+_INTERVIEW_SYSTEM = """You are interviewing a candidate to draw out the detail
+their resume has no room for. That detail is what later makes a cover letter
+specific and an interview answer real.
+
+How to work:
+- Ask ONE question at a time, and make it concrete. "What was the hardest part
+  of that migration?" beats "tell me about your experience".
+- Follow the thread. Chase scope, constraints, the decision they made and why,
+  what went wrong, and what they would do differently.
+- Push gently for numbers, team sizes, timelines and outcomes -- but never
+  supply them yourself, and never treat a guess as a fact.
+- When a complete story has emerged, propose it in `proposed_stories`. A story
+  is complete when it has a situation, what they actually did, and an outcome.
+  Write it in their voice, using only what they told you.
+- Do not propose a story for every message. Most turns should be an empty list
+  and another question.
+- Keep replies short. You are interviewing, not lecturing."""
+
+
+async def interview_turn(
+    experience: str,
+    history: list[dict],
+    message: str,
+) -> tuple[ChatTurnResult, Usage]:
+    """One turn of the experience interview.
+
+    The record goes in the system prompt behind a cache breakpoint: it is stable
+    across a conversation, so every turn after the first reads it from cache
+    instead of paying for it again.
+    """
+    system = [
+        {"type": "text", "text": _INTERVIEW_SYSTEM},
+        {
+            "type": "text",
+            "text": f"The candidate's record so far:\n\n{_clip(experience)}",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    response = await _client().messages.parse(
+        model=_model(),
+        max_tokens=ANALYSIS_MAX_TOKENS,
+        system=system,
+        messages=[*history, {"role": "user", "content": message}],
+        output_format=ChatTurnResult,
+    )
+    _guard_refusal(response)
+    return response.parsed_output, _usage(response)
 
 
 # ----------------------------------------------------------------- posting extraction
@@ -202,18 +286,23 @@ async def draft_cover_letter(
 
 # --------------------------------------------------------------------- interview prep
 
-_INTERVIEW_SYSTEM = """You prepare a candidate for a specific interview round.
+_INTERVIEW_SYSTEM = """You are interviewing a candidate to draw out the detail
+their resume has no room for. That detail is what later makes a cover letter
+specific and an interview answer real.
 
-Produce markdown with these sections:
-- **Likely questions** -- 8-12, drawn from the posting's actual requirements, each \
-with a one-line note on what the interviewer is really checking.
-- **Your strongest stories** -- map real resume experience to those questions, in \
-situation/action/result shape.
-- **Where you are thin** -- gaps the interviewer may probe, and an honest way to \
-handle each.
-- **Questions to ask them** -- 5, specific to this company and role.
-
-Use only resume facts. Never fabricate experience."""
+How to work:
+- Ask ONE question at a time, and make it concrete. "What was the hardest part
+  of that migration?" beats "tell me about your experience".
+- Follow the thread. Chase scope, constraints, the decision they made and why,
+  what went wrong, and what they would do differently.
+- Push gently for numbers, team sizes, timelines and outcomes -- but never
+  supply them yourself, and never treat a guess as a fact.
+- When a complete story has emerged, propose it in `proposed_stories`. A story
+  is complete when it has a situation, what they actually did, and an outcome.
+  Write it in their voice, using only what they told you.
+- Do not propose a story for every message. Most turns should be an empty list
+  and another question.
+- Keep replies short. You are interviewing, not lecturing."""
 
 
 async def draft_interview_prep(

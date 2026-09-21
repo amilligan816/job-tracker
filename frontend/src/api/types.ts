@@ -10,22 +10,125 @@ export type ApplicationStatus =
 
 export type RemoteType = "onsite" | "hybrid" | "remote" | "unknown";
 
+/** An artifact produced for, or attached to, one application. */
 export type DocumentKind =
-  | "base_resume"
-  | "tailored_resume"
+  | "resume"
   | "cover_letter"
+  | "interview_prep"
   | "portfolio"
   | "offer_letter"
   | "other";
 
 export const DOCUMENT_KIND_LABELS: Record<DocumentKind, string> = {
-  base_resume: "Base resume",
-  tailored_resume: "Tailored resume",
+  resume: "Resume",
   cover_letter: "Cover letter",
+  interview_prep: "Interview prep",
   portfolio: "Portfolio",
   offer_letter: "Offer letter",
   other: "Other",
 };
+
+export type ExperienceSource = "imported" | "manual" | "chat";
+
+export interface Highlight {
+  id: string;
+  text: string;
+  sort_order: number;
+  source: ExperienceSource;
+}
+
+export interface ExperienceRole {
+  id: string;
+  company: string;
+  title: string;
+  location: string | null;
+  employment_type: string | null;
+  start_date: string | null;
+  /** Null means current. */
+  end_date: string | null;
+  summary: string | null;
+  sort_order: number;
+  source: ExperienceSource;
+  highlights: Highlight[];
+}
+
+export interface ExperienceStory {
+  id: string;
+  title: string;
+  body: string;
+  role_id: string | null;
+  skills: string[];
+  source: ExperienceSource;
+  created_at: string;
+}
+
+export interface Education {
+  id: string;
+  institution: string;
+  credential: string | null;
+  field: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  notes: string | null;
+  sort_order: number;
+}
+
+export interface ProfileLink {
+  label: string;
+  url: string;
+}
+
+export interface ExperienceProfile {
+  id: string;
+  full_name: string | null;
+  headline: string | null;
+  email: string | null;
+  phone: string | null;
+  location: string | null;
+  links: ProfileLink[];
+  summary: string | null;
+  skills: string[];
+  roles: ExperienceRole[];
+  stories: ExperienceStory[];
+  education: Education[];
+  created_at: string;
+  updated_at: string;
+  /** Nothing to score or write from yet. */
+  is_empty: boolean;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  created_at: string;
+}
+
+export interface ProposedStory {
+  title: string;
+  body: string;
+  role_id: string | null;
+  skills: string[];
+}
+
+export interface ChatTurnResponse {
+  reply: ChatMessage;
+  proposed_stories: ProposedStory[];
+}
+
+export interface ImportedExperience {
+  full_name: string | null;
+  headline: string | null;
+  email: string | null;
+  phone: string | null;
+  location: string | null;
+  summary: string | null;
+  skills: string[];
+  roles: Array<Omit<ExperienceRole, "id" | "source" | "highlights"> & {
+    highlights: Array<{ text: string; sort_order: number }>;
+  }>;
+  education: Array<Omit<Education, "id">>;
+}
 
 export type EventKind =
   | "status_change"
@@ -114,11 +217,7 @@ export interface StoredDocument {
   size_bytes: number;
   storage_key: string;
   created_at: string;
-  /** True for the single base resume that tailored resumes are written from. */
-  is_base: boolean;
-  /** For a tailored resume: the base resume it came from. */
-  derived_from_id: string | null;
-  /** Whether readable text was extracted; the matcher needs it. */
+  /** Whether readable text was extracted. */
   has_text: boolean;
 }
 
@@ -141,7 +240,6 @@ export interface PostingMatch {
   required_years: number | null;
   resume_years: number | null;
   years_basis: string | null;
-  resume_document_id: string | null;
 }
 
 export interface Application {
