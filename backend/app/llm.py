@@ -24,11 +24,26 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 # Opus 5 runs adaptive thinking when `thinking` is omitted; effort is what we tune.
+# Non-streaming requests have a ceiling: the SDK refuses a `max_tokens` large
+# enough that the call could exceed its 10-minute timeout. Structured outputs
+# here are bounded and nowhere near these limits -- the budgets exist to catch a
+# runaway, not to be spent.
 EXTRACTION_MAX_TOKENS = 8000
-ANALYSIS_MAX_TOKENS = 32000
+STRUCTURED_MAX_TOKENS = 8000
+# A full career history is longer than a posting; still under the ceiling.
+IMPORT_MAX_TOKENS = 16000
+# Free-form prose is streamed, so it can have real room.
+GENERATION_MAX_TOKENS = 32000
 # Postings and resumes are long but bounded; this keeps a pathological upload
 # from turning into an expensive request.
 MAX_CONTEXT_CHARS = 120_000
+
+_LISTED_VS_EVIDENCED = """
+A skill that appears only in a skills list is a listed skill, not a
+demonstrated one. Never upgrade it into a claim of depth, frequency or
+recency -- no "I write X daily", no "extensive experience with X" -- unless a
+role or story actually shows it. Where the record only lists something, either
+say nothing about it or be accurate about what it is."""
 
 
 class AssistantUnavailable(RuntimeError):
@@ -90,6 +105,70 @@ def _usage(response) -> Usage:
     )
 
 
+def _strict_schema(model_cls) -> dict:
+    """A Pydantic model as a schema strict tool use will accept.
+
+    Every object -- including nested ones under `$defs` -- needs
+    `additionalProperties: false` and an explicit `required` list, or the API
+    rejects the whole tool. Optional fields stay in `required`; their schema
+    already permits null, so the model can still say "not stated".
+    """
+
+    def harden(node) -> None:
+        if isinstance(node, dict):
+            if "properties" in node:
+                node["additionalProperties"] = False
+                node["required"] = list(node["properties"])
+            for value in node.values():
+                harden(value)
+        elif isinstance(node, list):
+            for item in node:
+                harden(item)
+
+    schema = model_cls.model_json_schema()
+    harden(schema)
+    return schema
+
+
+async def _extract_via_tool(model_cls, system, prompt: str, max_tokens: int):
+    """Structured extraction through a strict tool instead of `output_format`.
+
+    `output_format` has a tighter schema budget and rejects our larger
+    extraction shapes with "Schema is too complex"; a strict tool accepts the
+    same schema and still guarantees the input validates. Smaller schemas
+    elsewhere keep using `messages.parse`, which is simpler.
+    """
+    name = f"record_{model_cls.__name__.lower()}"
+    response = await _client().messages.create(
+        model=_model(),
+        max_tokens=max_tokens,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+        tools=[
+            {
+                "name": name,
+                "description": f"Record the extracted {model_cls.__name__}.",
+                "strict": True,
+                "input_schema": _strict_schema(model_cls),
+            }
+        ],
+        # Forcing the tool keeps the model from answering in prose. Note this
+        # form is rejected by Fable 5.1 / Mythos 5.1, which would need
+        # tool_choice "auto" plus an instruction naming the tool.
+        tool_choice={"type": "tool", "name": name},
+    )
+    _guard_refusal(response)
+
+    block = next((b for b in response.content if b.type == "tool_use"), None)
+    if block is None:
+        raise AssistantUnavailable("Claude returned no structured data for this request.")
+    if response.stop_reason == "max_tokens":
+        raise AssistantUnavailable(
+            "The response was cut off before it finished. Try a shorter document."
+        )
+    return model_cls.model_validate(block.input), _usage(response)
+
+
 def _guard_refusal(response) -> None:
     if getattr(response, "stop_reason", None) == "refusal":
         details = getattr(response, "stop_details", None)
@@ -102,7 +181,7 @@ def _text_of(response) -> str:
     return "\n".join(block.text for block in response.content if block.type == "text").strip()
 
 
-async def _generate(system: str, prompt: str, max_tokens: int = ANALYSIS_MAX_TOKENS):
+async def _generate(system: str, prompt: str, max_tokens: int = GENERATION_MAX_TOKENS):
     """Single-turn text generation.
 
     Streamed: adaptive thinking plus a large `max_tokens` can run long enough to
@@ -137,25 +216,17 @@ Rules:
 
 async def extract_experience(resume_text: str) -> tuple[ImportedExperience, Usage]:
     """Pull structured career data out of an uploaded resume for review."""
-    response = await _client().messages.parse(
-        model=_model(),
-        max_tokens=ANALYSIS_MAX_TOKENS,
-        system=_IMPORT_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Extract the structured career data:\n\n{_clip(resume_text)}",
-            }
-        ],
-        output_format=ImportedExperience,
+    return await _extract_via_tool(
+        ImportedExperience,
+        _IMPORT_SYSTEM,
+        f"Extract the structured career data:\n\n{_clip(resume_text)}",
+        IMPORT_MAX_TOKENS,
     )
-    _guard_refusal(response)
-    return response.parsed_output, _usage(response)
 
 
 # ------------------------------------------------------------------ experience interview
 
-_INTERVIEW_SYSTEM = """You are interviewing a candidate to draw out the detail
+_EXPERIENCE_INTERVIEW_SYSTEM = """You are interviewing a candidate to draw out the detail
 their resume has no room for. That detail is what later makes a cover letter
 specific and an interview answer real.
 
@@ -186,7 +257,7 @@ async def interview_turn(
     instead of paying for it again.
     """
     system = [
-        {"type": "text", "text": _INTERVIEW_SYSTEM},
+        {"type": "text", "text": _EXPERIENCE_INTERVIEW_SYSTEM},
         {
             "type": "text",
             "text": f"The candidate's record so far:\n\n{_clip(experience)}",
@@ -195,7 +266,7 @@ async def interview_turn(
     ]
     response = await _client().messages.parse(
         model=_model(),
-        max_tokens=ANALYSIS_MAX_TOKENS,
+        max_tokens=STRUCTURED_MAX_TOKENS,
         system=system,
         messages=[*history, {"role": "user", "content": message}],
         output_format=ChatTurnResult,
@@ -206,7 +277,8 @@ async def interview_turn(
 
 # --------------------------------------------------------------------- resume tailoring
 
-_TAILOR_SYSTEM = """You tailor a candidate's resume to one job posting.
+_TAILOR_SYSTEM = (
+    """You tailor a candidate's resume to one job posting.
 
 You are selecting and sharpening, not writing new history:
 - Every highlight must be traceable to something in the record. Rephrase for
@@ -219,8 +291,13 @@ You are selecting and sharpening, not writing new history:
   role in a way that creates an unexplained gap in the last ten years.
 - Order highlights within a role by relevance to this posting, strongest first,
   and stay within the requested maximum.
+- Each role's own summary line is rendered above its bullets. Do not repeat it
+  as a highlight -- the bullets should add to it, not restate it.
 - The summary is two or three sentences, specific to this role, and must not
-  claim anything the record does not support."""
+  claim anything the record does not support.
+"""
+    + _LISTED_VS_EVIDENCED
+)
 
 
 async def tailor_resume(
@@ -246,7 +323,7 @@ async def tailor_resume(
     )
     response = await _client().messages.parse(
         model=_model(),
-        max_tokens=ANALYSIS_MAX_TOKENS,
+        max_tokens=STRUCTURED_MAX_TOKENS,
         system=system,
         messages=[{"role": "user", "content": prompt}],
         output_format=TailoredResume,
@@ -272,20 +349,12 @@ posting's own words where possible.
 
 async def extract_posting(raw_text: str) -> tuple[ExtractedPosting, Usage]:
     """Pull structured fields out of a raw posting blob."""
-    response = await _client().messages.parse(
-        model=_model(),
-        max_tokens=EXTRACTION_MAX_TOKENS,
-        system=_EXTRACT_SYSTEM,
-        messages=[
-            {
-                "role": "user",
-                "content": f"Extract the structured posting data:\n\n{_clip(raw_text)}",
-            }
-        ],
-        output_format=ExtractedPosting,
+    return await _extract_via_tool(
+        ExtractedPosting,
+        _EXTRACT_SYSTEM,
+        f"Extract the structured posting data:\n\n{_clip(raw_text)}",
+        EXTRACTION_MAX_TOKENS,
     )
-    _guard_refusal(response)
-    return response.parsed_output, _usage(response)
 
 
 # -------------------------------------------------------------------- match analysis
@@ -313,7 +382,7 @@ async def analyze_match(posting_text: str, resume_text: str | None) -> tuple[Mat
     )
     response = await _client().messages.parse(
         model=_model(),
-        max_tokens=ANALYSIS_MAX_TOKENS,
+        max_tokens=STRUCTURED_MAX_TOKENS,
         system=_MATCH_SYSTEM,
         messages=[{"role": "user", "content": prompt}],
         output_format=MatchAnalysis,
@@ -324,7 +393,9 @@ async def analyze_match(posting_text: str, resume_text: str | None) -> tuple[Mat
 
 # ---------------------------------------------------------------------- cover letter
 
-_COVER_LETTER_SYSTEM = """You draft cover letters for a candidate.
+
+_COVER_LETTER_SYSTEM = (
+    """You draft cover letters for a candidate.
 
 - Ground every claim in the resume. If the resume does not support a claim, leave \
 it out -- do not invent employers, dates, metrics, or credentials.
@@ -332,6 +403,8 @@ it out -- do not invent employers, dates, metrics, or credentials.
 - Open with the specific reason this role fits, not "I am writing to apply".
 - Plain text, no markdown headers, no placeholder brackets unless a fact is \
 genuinely missing -- then use [SQUARE BRACKETS] so the candidate can spot it."""
+    + _LISTED_VS_EVIDENCED
+)
 
 
 async def draft_cover_letter(
@@ -355,23 +428,21 @@ async def draft_cover_letter(
 
 # --------------------------------------------------------------------- interview prep
 
-_INTERVIEW_SYSTEM = """You are interviewing a candidate to draw out the detail
-their resume has no room for. That detail is what later makes a cover letter
-specific and an interview answer real.
+_INTERVIEW_PREP_SYSTEM = (
+    """You prepare a candidate for a specific interview round.
 
-How to work:
-- Ask ONE question at a time, and make it concrete. "What was the hardest part
-  of that migration?" beats "tell me about your experience".
-- Follow the thread. Chase scope, constraints, the decision they made and why,
-  what went wrong, and what they would do differently.
-- Push gently for numbers, team sizes, timelines and outcomes -- but never
-  supply them yourself, and never treat a guess as a fact.
-- When a complete story has emerged, propose it in `proposed_stories`. A story
-  is complete when it has a situation, what they actually did, and an outcome.
-  Write it in their voice, using only what they told you.
-- Do not propose a story for every message. Most turns should be an empty list
-  and another question.
-- Keep replies short. You are interviewing, not lecturing."""
+Produce markdown with these sections:
+- **Likely questions** -- 8-12, drawn from the posting's actual requirements,
+  each with a one-line note on what the interviewer is really checking.
+- **Your strongest stories** -- map real experience to those questions, in
+  situation/action/result shape.
+- **Where you are thin** -- gaps the interviewer may probe, and an honest way
+  to handle each.
+- **Questions to ask them** -- 5, specific to this company and role.
+
+Use only what the record contains. Never fabricate experience."""
+    + _LISTED_VS_EVIDENCED
+)
 
 
 async def draft_interview_prep(
@@ -387,5 +458,6 @@ async def draft_interview_prep(
         f"CANDIDATE RESUME\n----------------\n{_clip(resume_text)}\n\n"
         "Write the prep document."
     )
-    response = await _generate(_INTERVIEW_SYSTEM, prompt)
+    response = await _generate(_INTERVIEW_PREP_SYSTEM, prompt)
     return _text_of(response), _usage(response)
+
