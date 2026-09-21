@@ -29,6 +29,45 @@ other local projects. Change them in `.env`.
 The backend applies migrations on start, and `minio-init` creates the bucket, so
 a fresh `docker compose up` gives you a working stack with no extra steps.
 
+## Capturing a posting
+
+`POST /api/postings/capture` takes a URL or a pasted description. The raw text is
+always stored, so a posting stays re-parseable later.
+
+Most company career pages are a shell around an applicant tracking system: the
+HTML served over HTTP is navigation, cookie notices and EEO boilerplate, and the
+posting itself is fetched by JavaScript after load. Scraping one of those is
+*worse* than fetching nothing — a page of footer text still looks like content,
+so the extractor assembles a "posting" out of the legal small print.
+
+So `app/ats.py` goes to the ATS instead, for the three that publish postings over
+a public JSON API:
+
+| ATS | URLs it recognises | Endpoint |
+| --- | --- | --- |
+| Greenhouse | any URL with `gh_jid`, plus `*.greenhouse.io/<org>/jobs/<id>` | per-job |
+| Lever | `jobs.lever.co/<site>/<uuid>` | per-job |
+| Ashby | `jobs.ashbyhq.com/<org>/<uuid>`, plus any URL with `ashby_jid` | whole board, filtered |
+
+A board is addressed by a short token (`billtrust`) that an embedding page need
+not state anywhere machine-readable — Billtrust passes it in `source` and reads
+it back in its own inline script. So the resolver collects plausible tokens from
+the query string and the hostname and lets the API adjudicate: a wrong guess is a
+404, and the first usable answer wins. Anything it cannot resolve falls back to
+scraping, which is right for a career page that really does serve HTML.
+
+Two notes on what the APIs give you. Ashby has no per-job endpoint, so its board
+is pulled and filtered by id under a size ceiling. Neither Lever nor Ashby names
+the company anywhere in its payload, so that field is left empty rather than
+guessed from the URL token — the description almost always names the company and
+the extractor picks it up from there.
+
+When a page cannot be resolved *and* scrapes to boilerplate, the extractor says
+so via `is_job_posting` and the capture is refused with a 422 telling you to paste
+the description. That field exists because `title` is required: without somewhere
+to report "this is not a posting", the model is forced to invent one out of the
+page furniture, and a confident wrong record is worse than an error.
+
 ## Experience
 
 There is no stored base resume. The candidate's career lives as structured data

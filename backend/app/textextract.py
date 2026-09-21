@@ -1,6 +1,5 @@
 """Turn uploaded files and fetched web pages into plain text for the assistant."""
 
-import html
 import io
 import logging
 import re
@@ -66,13 +65,14 @@ def _render_ats_posting(posting: AtsPosting) -> str:
     for label, value in (
         ("Company", posting.company),
         ("Location", posting.location),
+        ("Workplace", posting.workplace),
         ("Employment type", posting.employment_type),
+        ("Compensation", posting.compensation),
     ):
         if value:
             header.append(f"{label}: {value}")
 
-    # Greenhouse returns the description as HTML-escaped HTML.
-    body = html_to_text(html.unescape(posting.content_html))
+    body = html_to_text(posting.content_html)
     return _collapse("\n".join(header) + "\n\n" + body)
 
 

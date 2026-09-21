@@ -7,11 +7,14 @@ fetching nothing, because a page of footer text still looks like content -- the
 extractor will dutifully assemble a "posting" out of the legal small print.
 
 Where the ATS publishes the same posting over a public JSON API, we ask it
-directly instead of scraping the shell.
+directly instead of scraping the shell. Greenhouse, Lever and Ashby all do.
 """
 
+import html
+import json
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -19,16 +22,23 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-_GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards/{board}/jobs/{job_id}"
+_GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{job_id}"
+_LEVER_API = "https://api.lever.co/v0/postings/{org}/{job_id}"
+_ASHBY_API = "https://api.ashbyhq.com/posting-api/job-board/{org}?includeCompensation=true"
 
-# A Greenhouse board is addressed by a short token ("billtrust"), which an
-# embedding page does not have to state anywhere machine-readable -- Billtrust,
-# for one, passes it in `source` and reads it back in its own inline script. So
-# we collect plausible tokens and let the API adjudicate: a wrong guess is a
-# 404, and the first 200 is the answer.
-_MAX_BOARD_GUESSES = 4
+# An ATS board is addressed by a short token ("billtrust"), which an embedding
+# page does not have to state anywhere machine-readable -- Billtrust, for one,
+# passes it in `source` and reads it back in its own inline script. So we
+# collect plausible tokens and let the API adjudicate: a wrong guess is a 404,
+# and the first usable answer wins.
+_MAX_ORG_GUESSES = 4
 
-# Subdomains and suffixes that are never the board token.
+# Ashby publishes no single-job endpoint -- the public posting API serves the
+# whole board, which is already megabytes for a mid-size company. Read it with a
+# ceiling so a very large employer cannot make us buffer the heap.
+_MAX_JSON_BYTES = 8 * 1024 * 1024
+
+# Subdomains and suffixes that are never the org token.
 _GENERIC_LABELS = frozenset(
     {"www", "careers", "career", "jobs", "job", "apply", "hire", "hiring", "work", "talent"}
 )
@@ -36,8 +46,11 @@ _PUBLIC_SUFFIXES = frozenset(
     {"com", "org", "net", "io", "co", "ai", "dev", "app", "inc", "us", "uk", "eu", "de", "fr"}
 )
 
-# boards.greenhouse.io/acme/jobs/123 and job-boards.greenhouse.io/acme/jobs/123
-_GREENHOUSE_PATH = re.compile(r"^/(?P<board>[A-Za-z0-9_-]+)/jobs/(?P<job_id>\d+)")
+# boards.greenhouse.io/acme/jobs/123, job-boards.greenhouse.io/acme/jobs/123
+_GREENHOUSE_PATH = re.compile(r"^/(?P<org>[A-Za-z0-9_-]+)/jobs/(?P<job_id>\d+)")
+# jobs.lever.co/acme/<uuid>, jobs.ashbyhq.com/acme/<uuid> (+ /apply, /application)
+_UUID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+_ORG_UUID_PATH = re.compile(rf"^/(?P<org>[A-Za-z0-9_.-]+)/(?P<job_id>{_UUID})")
 
 
 @dataclass(slots=True)
@@ -50,7 +63,14 @@ class AtsPosting:
     employment_type: str | None
     content_html: str
     ats: str
+    workplace: str | None = None
+    compensation: str | None = None
     canonical_url: str | None = None
+
+
+# A resolver reads a URL and, when it recognises one, fetches the posting.
+_Target = Callable[[str], tuple[list[str], str | None]]
+_Fetch = Callable[[httpx.AsyncClient, list[str], str], Awaitable[AtsPosting | None]]
 
 
 async def resolve_posting(url: str, client: httpx.AsyncClient | None = None) -> AtsPosting | None:
@@ -60,14 +80,15 @@ async def resolve_posting(url: str, client: httpx.AsyncClient | None = None) -> 
     back to scraping the page, which is the right answer for a career page that
     really does serve its postings as HTML.
     """
-    board, job_id = _greenhouse_target(url)
-    if not job_id:
-        return None
-
-    if client is not None:
-        return await _greenhouse_fetch(client, board, job_id)
-    async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as owned:
-        return await _greenhouse_fetch(owned, board, job_id)
+    for target, fetch in _RESOLVERS:
+        orgs, job_id = target(url)
+        if not job_id or not orgs:
+            continue
+        if client is not None:
+            return await fetch(client, orgs, job_id)
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as owned:
+            return await fetch(owned, orgs, job_id)
+    return None
 
 
 # ------------------------------------------------------------------------- greenhouse
@@ -82,57 +103,24 @@ def _greenhouse_target(url: str) -> tuple[list[str], str | None]:
     if host.endswith("greenhouse.io"):
         match = _GREENHOUSE_PATH.match(parsed.path)
         if match:
-            return [match["board"]], match["job_id"]
+            return [match["org"]], match["job_id"]
         # The embed form: /embed/job_app?for=acme&token=123
-        job_id = _first(params, "token", "gh_jid")
-        return _board_candidates(params, host), job_id
+        return _org_candidates(params, host), _first(params, "token", "gh_jid")
 
     job_id = _first(params, "gh_jid")
     if not job_id:
         return [], None
-    return _board_candidates(params, host), job_id
-
-
-def _board_candidates(params: dict[str, list[str]], host: str) -> list[str]:
-    """Board tokens worth trying, most explicit first."""
-    candidates: list[str] = []
-
-    def add(value: str | None) -> None:
-        value = (value or "").strip().lower()
-        if value and value not in candidates and re.fullmatch(r"[a-z0-9_-]+", value):
-            candidates.append(value)
-
-    # An explicit token in the query string beats anything guessed from the host.
-    for key in ("for", "board", "gh_board", "source", "company"):
-        add(_first(params, key))
-
-    for label in host.split("."):
-        if label not in _GENERIC_LABELS and label not in _PUBLIC_SUFFIXES:
-            add(label)
-
-    return candidates[:_MAX_BOARD_GUESSES]
+    return _org_candidates(params, host), job_id
 
 
 async def _greenhouse_fetch(
-    client: httpx.AsyncClient, boards: list[str], job_id: str
+    client: httpx.AsyncClient, orgs: list[str], job_id: str
 ) -> AtsPosting | None:
-    for board in boards:
-        url = _GREENHOUSE_API.format(board=board, job_id=job_id)
-        try:
-            response = await client.get(url)
-        except httpx.HTTPError:
-            logger.warning("Greenhouse lookup failed for board %r", board, exc_info=True)
+    for org in orgs:
+        data = await _get_json(client, _GREENHOUSE_API.format(org=org, job_id=job_id))
+        if not isinstance(data, dict):
             continue
-        if response.status_code == 404:
-            continue
-        if response.status_code >= 400:
-            logger.warning("Greenhouse returned %s for board %r", response.status_code, board)
-            continue
-        try:
-            posting = _greenhouse_posting(response.json())
-        except (ValueError, TypeError, KeyError):
-            logger.warning("Greenhouse payload was not a posting for %r", board, exc_info=True)
-            continue
+        posting = _greenhouse_posting(data)
         if posting is not None:
             return posting
     return None
@@ -145,27 +133,237 @@ def _greenhouse_posting(data: dict) -> AtsPosting | None:
         return None
 
     location = data.get("location") or {}
-    metadata = data.get("metadata") or []
-    employment = next(
-        (
-            str(item.get("value"))
-            for item in metadata
-            if isinstance(item, dict)
-            and str(item.get("name", "")).lower() in {"employment type", "job type"}
-            and item.get("value")
-        ),
-        None,
-    )
-
     return AtsPosting(
         title=title,
         company=(data.get("company_name") or None),
         location=(location.get("name") if isinstance(location, dict) else None) or None,
-        employment_type=employment,
-        content_html=content,
+        employment_type=_metadata_value(data.get("metadata"), {"employment type", "job type"}),
+        # Greenhouse double-encodes: the description arrives as HTML-escaped
+        # HTML. Normalise it here so every adapter hands back real markup.
+        content_html=html.unescape(content),
         ats="greenhouse",
         canonical_url=data.get("absolute_url") or None,
     )
+
+
+def _metadata_value(metadata, names: set[str]) -> str | None:
+    """Greenhouse hangs custom fields off a `metadata` list of name/value pairs."""
+    if not isinstance(metadata, list):
+        return None
+    for item in metadata:
+        if (
+            isinstance(item, dict)
+            and str(item.get("name", "")).lower() in names
+            and item.get("value")
+        ):
+            return str(item["value"])
+    return None
+
+
+# ------------------------------------------------------------------------------ lever
+
+
+def _lever_target(url: str) -> tuple[list[str], str | None]:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith("lever.co"):
+        return [], None
+    match = _ORG_UUID_PATH.match(parsed.path)
+    if not match:
+        return [], None
+    return [match["org"]], match["job_id"]
+
+
+async def _lever_fetch(
+    client: httpx.AsyncClient, orgs: list[str], job_id: str
+) -> AtsPosting | None:
+    for org in orgs:
+        data = await _get_json(client, _LEVER_API.format(org=org, job_id=job_id))
+        if not isinstance(data, dict):
+            continue
+        posting = _lever_posting(data)
+        if posting is not None:
+            return posting
+    return None
+
+
+def _lever_posting(data: dict) -> AtsPosting | None:
+    title = (data.get("text") or "").strip()
+    if not title:
+        return None
+
+    categories = data.get("categories") or {}
+    if not isinstance(categories, dict):
+        categories = {}
+
+    # Lever splits a posting across `description`, a run of titled `lists` and a
+    # closing `additional`. The lists hold the requirements and responsibilities,
+    # so a body built from `description` alone loses the substance of the posting.
+    sections = [data.get("description") or ""]
+    for block in data.get("lists") or []:
+        if not isinstance(block, dict):
+            continue
+        heading = (block.get("text") or "").strip()
+        content = block.get("content") or ""
+        if heading:
+            sections.append(f"<h3>{heading}</h3>")
+        if content:
+            sections.append(f"<ul>{content}</ul>")
+    sections.append(data.get("additional") or "")
+
+    content_html = "\n".join(part for part in sections if part.strip())
+    if not content_html:
+        return None
+
+    workplace = data.get("workplaceType")
+    return AtsPosting(
+        title=title,
+        # Lever's public payload never names the company; the description almost
+        # always does, so leave it to the extractor rather than guessing from the
+        # URL token.
+        company=None,
+        location=categories.get("location") or None,
+        employment_type=categories.get("commitment") or None,
+        content_html=content_html,
+        ats="lever",
+        workplace=workplace if workplace and workplace != "unspecified" else None,
+        canonical_url=data.get("hostedUrl") or None,
+    )
+
+
+# ------------------------------------------------------------------------------ ashby
+
+
+def _ashby_target(url: str) -> tuple[list[str], str | None]:
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    host = (parsed.hostname or "").lower()
+
+    if host.endswith("ashbyhq.com"):
+        match = _ORG_UUID_PATH.match(parsed.path)
+        if match:
+            return [match["org"]], match["job_id"]
+        return _org_candidates(params, host), _first(params, "ashby_jid")
+
+    job_id = _first(params, "ashby_jid")
+    if not job_id:
+        return [], None
+    return _org_candidates(params, host), job_id
+
+
+async def _ashby_fetch(
+    client: httpx.AsyncClient, orgs: list[str], job_id: str
+) -> AtsPosting | None:
+    """Ashby publishes no per-job endpoint, so pull the board and pick the job out."""
+    for org in orgs:
+        data = await _get_json(client, _ASHBY_API.format(org=org))
+        if not isinstance(data, dict):
+            continue
+        jobs = data.get("jobs")
+        if not isinstance(jobs, list):
+            continue
+        for job in jobs:
+            if isinstance(job, dict) and job.get("id") == job_id:
+                posting = _ashby_posting(job)
+                if posting is not None:
+                    return posting
+        # The board resolved but holds no such job: a later org guess will not
+        # help, and the job is most likely closed.
+        logger.info("Ashby board %r does not list job %s", org, job_id)
+        return None
+    return None
+
+
+def _ashby_posting(job: dict) -> AtsPosting | None:
+    title = (job.get("title") or "").strip()
+    content = job.get("descriptionHtml") or ""
+    if not title or not content:
+        return None
+
+    compensation = job.get("compensation") or {}
+    if not isinstance(compensation, dict):
+        compensation = {}
+    # `compensationTierSummary` carries the equity/bonus notes too; the
+    # scrapeable summary is the bare range and is the better parse target.
+    salary = compensation.get("scrapeableCompensationSalarySummary") or compensation.get(
+        "compensationTierSummary"
+    )
+
+    locations = [job.get("location")] + list(job.get("secondaryLocations") or [])
+    names = [item.get("location") if isinstance(item, dict) else item for item in locations if item]
+    workplace = job.get("workplaceType")
+    if not workplace and job.get("isRemote"):
+        workplace = "Remote"
+
+    return AtsPosting(
+        title=title,
+        # Ashby's board payload has no organisation name either.
+        company=None,
+        location=", ".join(str(name) for name in names if name) or None,
+        employment_type=job.get("employmentType") or None,
+        content_html=content,
+        ats="ashby",
+        workplace=workplace or None,
+        compensation=str(salary) if salary else None,
+        canonical_url=job.get("jobUrl") or None,
+    )
+
+
+# ---------------------------------------------------------------------------- shared
+
+_RESOLVERS: tuple[tuple[_Target, _Fetch], ...] = (
+    (_greenhouse_target, _greenhouse_fetch),
+    (_lever_target, _lever_fetch),
+    (_ashby_target, _ashby_fetch),
+)
+
+
+async def _get_json(client: httpx.AsyncClient, url: str) -> dict | list | None:
+    """GET a JSON document, or None for any reason it could not be read.
+
+    Every failure is the same to the caller -- try the next org guess, then fall
+    back to scraping -- so this swallows the difference and logs it.
+    """
+    try:
+        async with client.stream("GET", url) as response:
+            if response.status_code == 404:
+                return None
+            if response.status_code >= 400:
+                logger.warning("ATS returned %s for %s", response.status_code, url)
+                return None
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body += chunk
+                if len(body) > _MAX_JSON_BYTES:
+                    logger.warning("ATS response for %s exceeded %d bytes", url, _MAX_JSON_BYTES)
+                    return None
+        return json.loads(body)
+    except httpx.HTTPError:
+        logger.warning("ATS lookup failed for %s", url, exc_info=True)
+        return None
+    except (ValueError, TypeError):
+        logger.warning("ATS response for %s was not JSON", url, exc_info=True)
+        return None
+
+
+def _org_candidates(params: dict[str, list[str]], host: str) -> list[str]:
+    """Org tokens worth trying, most explicit first."""
+    candidates: list[str] = []
+
+    def add(value: str | None) -> None:
+        value = (value or "").strip().lower()
+        if value and value not in candidates and re.fullmatch(r"[a-z0-9_-]+", value):
+            candidates.append(value)
+
+    # An explicit token in the query string beats anything guessed from the host.
+    for key in ("for", "board", "gh_board", "source", "company", "org"):
+        add(_first(params, key))
+
+    for label in host.split("."):
+        if label not in _GENERIC_LABELS and label not in _PUBLIC_SUFFIXES:
+            add(label)
+
+    return candidates[:_MAX_ORG_GUESSES]
 
 
 def _first(params: dict[str, list[str]], *keys: str) -> str | None:
