@@ -78,6 +78,38 @@ class EventKind(enum.StrEnum):
     interview = "interview"
     outreach = "outreach"
     followup = "followup"
+    # Something arrived in the inbox about this application.
+    email = "email"
+
+
+class MailProviderKind(enum.StrEnum):
+    """Which mailbox an account speaks to.
+
+    Only Gmail today, but the column is an enum and `app/mail/provider.py`
+    defines the interface so Outlook or IMAP can be added without a rewrite.
+    """
+
+    gmail = "gmail"
+
+
+class MailAccountStatus(enum.StrEnum):
+    active = "active"
+    # The refresh token stopped working -- the user has to reconnect.
+    needs_reauth = "needs_reauth"
+    error = "error"
+
+
+class SuggestionState(enum.StrEnum):
+    pending = "pending"
+    accepted = "accepted"
+    dismissed = "dismissed"
+
+
+class SuggestionSource(enum.StrEnum):
+    """What decided the suggestion, so the UI can say so."""
+
+    heuristic = "heuristic"
+    claude = "claude"
 
 
 class AssistantRunKind(enum.StrEnum):
@@ -411,3 +443,141 @@ class AssistantRun(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class MailAccount(TimestampMixin, Base):
+    """A connected mailbox we read job-application mail out of.
+
+    Tokens are encrypted at rest (`app/crypto.py`) -- the columns hold
+    ciphertext, and `app/mail/gmail.py` is the only thing that decrypts them.
+    """
+
+    __tablename__ = "mail_accounts"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    provider: Mapped[MailProviderKind] = mapped_column(
+        Enum(MailProviderKind, name="mail_provider_kind"), nullable=False
+    )
+    email_address: Mapped[str] = mapped_column(String(320), nullable=False)
+
+    access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token: Mapped[str | None] = mapped_column(Text)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    scopes: Mapped[str | None] = mapped_column(String(1024))
+
+    # Gmail's historyId, the point we resume incremental sync from. Null means
+    # the next sync backfills over the lookback window instead.
+    sync_cursor: Mapped[str | None] = mapped_column(String(64))
+    status: Mapped[MailAccountStatus] = mapped_column(
+        Enum(MailAccountStatus, name="mail_account_status"),
+        default=MailAccountStatus.active,
+        nullable=False,
+    )
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_error: Mapped[str | None] = mapped_column(Text)
+    # {"scanned": n, "stored": n, "suggested": n} from the most recent run.
+    last_sync_stats: Mapped[dict | None] = mapped_column(JSONB)
+
+    messages: Mapped[list["MailMessage"]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        Index("uq_mail_accounts_provider_address", "provider", "email_address", unique=True),
+    )
+
+
+class MailMessage(Base):
+    """One retained email.
+
+    Only messages the matcher ties to a tracked application, or that come from a
+    recognised applicant-tracking system, are stored. Everything else is read in
+    memory during a sync and dropped -- this table is not a mirror of the inbox.
+    """
+
+    __tablename__ = "mail_messages"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mail_accounts.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # The provider's own id, so a resync recognises what it already has. It is
+    # per-mailbox: the same email in two accounts has two of these.
+    provider_message_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    # The RFC-822 `Message-Id`, which the *sender* set and which therefore
+    # survives across mailboxes. This is what stops one email addressed to two
+    # connected accounts becoming two things to review.
+    rfc822_message_id: Mapped[str | None] = mapped_column(String(998), index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(255), index=True)
+
+    from_email: Mapped[str | None] = mapped_column(String(320), index=True)
+    from_name: Mapped[str | None] = mapped_column(String(320))
+    to_email: Mapped[str | None] = mapped_column(String(320))
+    subject: Mapped[str | None] = mapped_column(String(998))
+    snippet: Mapped[str | None] = mapped_column(Text)
+    body_text: Mapped[str | None] = mapped_column(Text)
+    received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    account: Mapped[MailAccount] = relationship(back_populates="messages")
+    suggestion: Mapped["MailSuggestion | None"] = relationship(
+        back_populates="message", cascade="all, delete-orphan", uselist=False
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_mail_messages_account_provider_id",
+            "account_id",
+            "provider_message_id",
+            unique=True,
+        ),
+    )
+
+
+class MailSuggestion(Base):
+    """A proposed pipeline update read out of one email.
+
+    Nothing here touches an application until the user accepts it; accepting is
+    what writes the status and the timeline entry.
+    """
+
+    __tablename__ = "mail_suggestions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    message_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("mail_messages.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    application_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("applications.id", ondelete="CASCADE"), index=True
+    )
+
+    suggested_status: Mapped[ApplicationStatus | None] = mapped_column(
+        Enum(ApplicationStatus, name="application_status")
+    )
+    # 0-1. Drives ordering and how emphatically the UI presents the suggestion.
+    confidence: Mapped[float] = mapped_column(Numeric(4, 3), default=0, nullable=False)
+    source: Mapped[SuggestionSource] = mapped_column(
+        Enum(SuggestionSource, name="suggestion_source"),
+        default=SuggestionSource.heuristic,
+        nullable=False,
+    )
+    reasoning: Mapped[str | None] = mapped_column(Text)
+    # What actually matched -- phrases, sender domain, thread continuity. Shown
+    # in the UI so a suggestion is auditable rather than a bare verdict.
+    signals: Mapped[dict | None] = mapped_column(JSONB)
+
+    state: Mapped[SuggestionState] = mapped_column(
+        Enum(SuggestionState, name="suggestion_state"),
+        default=SuggestionState.pending,
+        nullable=False,
+        index=True,
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    message: Mapped[MailMessage] = relationship(back_populates="suggestion")
+    application: Mapped[Application | None] = relationship()

@@ -12,6 +12,7 @@ import AddIcon from "@mui/icons-material/Add";
 import EventBusyIcon from "@mui/icons-material/EventBusy";
 import ForumIcon from "@mui/icons-material/Forum";
 import LocalOfferIcon from "@mui/icons-material/LocalOffer";
+import MarkEmailUnreadIcon from "@mui/icons-material/MarkEmailUnread";
 import WorkHistoryIcon from "@mui/icons-material/WorkHistory";
 import { useQuery } from "@tanstack/react-query";
 import { Link as RouterLink } from "react-router-dom";
@@ -26,10 +27,12 @@ import UpcomingActions from "../components/UpcomingActions";
 export default function DashboardPage() {
   const summary = useQuery({ queryKey: ["summary"], queryFn: api.applications.summary });
   const assistant = useQuery({ queryKey: ["assistant-status"], queryFn: api.assistant.status });
+  const mail = useQuery({ queryKey: ["mail-status"], queryFn: api.mail.status });
 
   const counts = summary.data?.by_status ?? {};
   const active = ACTIVE_STATUSES.reduce((sum, s) => sum + (counts[s] ?? 0), 0);
   const needsAction = summary.data?.needs_action ?? 0;
+  const inboxUpdates = mail.data?.pending_suggestions ?? 0;
 
   return (
     <Stack spacing={3}>
@@ -47,6 +50,22 @@ export default function DashboardPage() {
           Capture a posting
         </Button>
       </Stack>
+
+      {inboxUpdates > 0 && (
+        <Alert
+          severity="info"
+          icon={<MarkEmailUnreadIcon fontSize="inherit" />}
+          action={
+            <Button component={RouterLink} to="/email" size="small" color="inherit">
+              Review
+            </Button>
+          }
+        >
+          {inboxUpdates === 1
+            ? "1 update from your inbox is waiting to be reviewed."
+            : `${inboxUpdates} updates from your inbox are waiting to be reviewed.`}
+        </Alert>
+      )}
 
       {assistant.data && !assistant.data.enabled && (
         <Alert severity="info">

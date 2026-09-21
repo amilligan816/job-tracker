@@ -19,9 +19,14 @@ import type {
   ResumeBuildResult,
   ResumeTemplate,
   JobPosting,
+  MailAccount,
+  MailStatus,
+  MailSuggestion,
+  MailSyncResult,
   PipelineSummary,
   PostingMatch,
   StoredDocument,
+  SuggestionState,
 } from "./types";
 
 const BASE = `${import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"}/api`;
@@ -246,5 +251,28 @@ export const api = {
         method: "POST",
         body: JSON.stringify(body),
       }),
+  },
+
+  mail: {
+    status: () => request<MailStatus>("/mail/status"),
+    accounts: () => request<MailAccount[]>("/mail/accounts"),
+    /** Returns where to send the browser; Google redirects back to /email. */
+    startGoogleAuth: () =>
+      request<{ authorization_url: string }>("/mail/oauth/google/start"),
+    disconnect: (id: string) => request<void>(`/mail/accounts/${id}`, { method: "DELETE" }),
+    sync: (id: string) => request<MailSyncResult>(`/mail/accounts/${id}/sync`, { method: "POST" }),
+    syncAll: () => request<Record<string, MailSyncResult>>("/mail/sync", { method: "POST" }),
+
+    suggestions: (params: { state?: SuggestionState; application_id?: string } = {}) =>
+      request<MailSuggestion[]>(`/mail/suggestions${qs(params)}`),
+    /** The full email body, fetched when a row is expanded. */
+    suggestion: (id: string) => request<MailSuggestion>(`/mail/suggestions/${id}`),
+    accept: (id: string, body: { application_id?: string; status?: string } = {}) =>
+      request<MailSuggestion>(`/mail/suggestions/${id}/accept`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+    dismiss: (id: string) =>
+      request<MailSuggestion>(`/mail/suggestions/${id}/dismiss`, { method: "POST" }),
   },
 };

@@ -2,8 +2,8 @@
 
 A job search assistant: track applications through a pipeline, keep resumes and
 job descriptions in object storage, capture postings from a URL or a paste, see
-a computed match rating for every role, and use Claude for deeper analysis,
-cover letters and interview prep.
+a computed match rating for every role, pick up status changes from your inbox,
+and use Claude for deeper analysis, cover letters and interview prep.
 
 - **Backend** — FastAPI, SQLAlchemy 2 (async) + Postgres, Alembic, MinIO via boto3, Anthropic SDK
 - **Frontend** — React + TypeScript + MUI, Vite, TanStack Query, React Router
@@ -63,6 +63,82 @@ From an application, a resume is built from the record and a template.
 
 Output goes to PDF or Word through the same renderer as everything else, and is
 filed against the application.
+
+## Email updates
+
+Connect a Gmail account and the app reads status changes out of your inbox:
+rejections, recruiter screens, interview invitations, offers. Nothing moves on
+its own — a sync produces **suggestions**, and accepting one is what changes a
+status and writes the timeline entry.
+
+Set it up on the **Email** page. You can connect as many mailboxes as you like —
+a personal address and a work one are read into the same review queue, and each
+syncs and reconnects independently, so one needing attention does not stop the
+other.
+
+The Google Cloud steps are in `.env.example`; you need `GOOGLE_CLIENT_ID`,
+`GOOGLE_CLIENT_SECRET` and a `MAIL_TOKEN_KEY`:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+Scope is `gmail.readonly`. The app reads mail; it cannot send, label, archive or
+delete.
+
+### What it stores
+
+Only messages it can tie to something you are tracking. A sync walks headers
+first — sender and subject, which is cheap — and most of an inbox is dropped
+right there, unread. A message earns a body fetch only if it comes from a
+company you have applied to, from a recognised applicant-tracking system, or in
+a thread already filed against an application. What survives classification is
+stored; everything else is examined in memory and forgotten.
+
+An email that reaches two connected mailboxes is one thing to review, not two.
+Gmail gives the same message a different id in each account, so deduplication
+keys on the `Message-Id` the *sender* set, which is the same in both.
+
+Disconnecting an account deletes its messages with it, and leaves any other
+connected mailbox untouched.
+
+### How an email is read
+
+Two questions, answered separately because they fail differently.
+
+**Which application is this about** — sender domain against the company's
+website and the posting link, company name in the display name or subject, the
+role title, and thread continuity (a recruiter's fourth reply rarely names the
+company, but it is unambiguously about the same job). A wrong answer here is the
+expensive kind, so two applications that match almost equally well produce no
+suggestion rather than a coin flip.
+
+**What it says happened** — weighted phrases per status. "We've decided to move
+forward with other candidates" is a rejection; "we'd love to move forward" is
+not. A decisive rejection outranks everything else in the message, because
+rejections routinely thank you for interviewing and mention the offer they are
+not making.
+
+Suggestions that would move an application backwards are dropped — an ATS
+autoresponder arriving after a phone screen does not un-screen you — and a
+closed application is not reopened.
+
+With a Claude credential set, emails the phrases are unsure about get a second
+opinion (`MAIL_USE_CLAUDE=false` turns that off). Claude picks from a shortlist
+by index rather than naming an application id, so it cannot invent one. Without
+a credential the heuristics run alone and the feature still works.
+
+### Syncing
+
+The backend polls every `MAIL_SYNC_INTERVAL_SECONDS` (default 900; `0` disables
+the loop and leaves the *Sync now* button). Polling rather than Gmail push
+notifications, which need a Pub/Sub topic and a publicly reachable endpoint that
+a locally-run stack does not have.
+
+The first sync of a mailbox backfills `MAIL_LOOKBACK_DAYS` (default 30); after
+that it resumes from Gmail's history cursor. A run is capped at
+`MAIL_MAX_MESSAGES_PER_SYNC`, and a capped run holds its cursor back so the
+remainder is picked up next time rather than skipped.
 
 ## Match rating (no AI)
 
@@ -150,12 +226,18 @@ backend/          FastAPI service
     experience.py the career record and its text rendering
     matching.py   deterministic match rating
     skills.py     skill vocabulary (plain data)
+    crypto.py     encrypts stored OAuth tokens
+    mail/         email sync
+      provider.py the interface a mailbox has to present
+      gmail.py    Google OAuth + the Gmail API
+      classify.py which application an email is about, and what it says
+      sync.py     one pass over a mailbox
     render.py     .docx / .pdf rendering
     llm.py        Claude integration
     textextract.py  PDF/HTML -> text
-    routers/      companies, postings, applications, documents, assistant
+    routers/      companies, postings, applications, documents, assistant, mail
   alembic/        migrations
-  tests/          matcher, renderer and experience tests
+  tests/          matcher, renderer, experience and mail-classifier tests
 frontend/         Vite + React + MUI SPA
 infra/            Postgres + MinIO compose file
 docker-compose.yml  full stack (includes infra/)
@@ -208,6 +290,24 @@ goes multi-user.
 **A frontend edit doesn't show up.** Vite's transform cache in the container can
 go stale even though the bind mount has the new file. `docker compose restart
 frontend` clears it.
+
+**Connecting Gmail fails with a redirect URI mismatch.** `GOOGLE_REDIRECT_URI`
+has to match what is registered on the OAuth client character for character,
+including the scheme and port.
+
+**Google did not issue a refresh token.** This happens when the account has
+already granted the app access, so the consent screen is skipped. Remove the app
+at https://myaccount.google.com/permissions and connect again.
+
+**A mailbox says it needs reconnecting.** Either the grant was revoked, or
+`MAIL_TOKEN_KEY` changed since the tokens were stored — the stored ciphertext
+will not decrypt under a new key. Reconnect the account. Other connected
+mailboxes keep working; a failed sync is recorded per account.
+
+**Connecting a second mailbox reconnects the first instead.** Google reuses
+whichever account the browser is already signed into. Pick the other one on the
+account chooser, or sign out of Google first. Accounts are keyed by address, so
+re-consenting as the same address updates that account rather than adding one.
 
 ## Storage notes
 

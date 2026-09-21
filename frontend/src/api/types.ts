@@ -318,3 +318,76 @@ export interface AssistantStatus {
   enabled: boolean;
   model: string;
 }
+
+// ----------------------------------------------------------------------- mail
+
+export type MailProviderKind = "gmail";
+export type MailAccountStatus = "active" | "needs_reauth" | "error";
+export type SuggestionState = "pending" | "accepted" | "dismissed";
+export type SuggestionSource = "heuristic" | "claude";
+
+export interface MailSyncResult {
+  scanned: number;
+  stored: number;
+  suggested: number;
+  /** The run hit its ceiling; syncing again picks up where it stopped. */
+  truncated: boolean;
+  error: string | null;
+}
+
+export interface MailAccount {
+  id: string;
+  provider: MailProviderKind;
+  email_address: string;
+  status: MailAccountStatus;
+  last_synced_at: string | null;
+  last_sync_error: string | null;
+  last_sync_stats: MailSyncResult | null;
+  created_at: string;
+}
+
+export interface MailStatus {
+  /** False when no Google OAuth client is configured — not a transient failure. */
+  configured: boolean;
+  assistant_enabled: boolean;
+  sync_interval_seconds: number;
+  accounts: MailAccount[];
+  pending_suggestions: number;
+}
+
+export interface MailMessage {
+  id: string;
+  from_email: string | null;
+  from_name: string | null;
+  subject: string | null;
+  snippet: string | null;
+  /** Only populated by the single-suggestion endpoint; the list omits it. */
+  body_text: string | null;
+  received_at: string | null;
+}
+
+export interface MailSuggestion {
+  id: string;
+  application_id: string | null;
+  /** Null means "related mail, no pipeline change" — still worth filing. */
+  suggested_status: ApplicationStatus | null;
+  confidence: number;
+  source: SuggestionSource;
+  reasoning: string | null;
+  signals: {
+    matched_on?: string[];
+    match_confidence?: number;
+    read_as?: string;
+    phrases?: Record<string, string[]>;
+    heuristic?: { status: string | null; confidence: number } | null;
+  } | null;
+  state: SuggestionState;
+  created_at: string;
+  resolved_at: string | null;
+  message: MailMessage;
+  company_name: string | null;
+  posting_title: string | null;
+  current_status: ApplicationStatus | null;
+  /** Which connected mailbox it arrived in; only shown when there are several. */
+  account_email: string | null;
+}

@@ -90,6 +90,7 @@ async def capture_posting(payload: PostingCaptureRequest, db: AsyncSession = Dep
 
     if payload.parse:
         extracted, _usage = await extract_posting(raw_text)
+        _guard_not_a_posting(extracted, from_url=bool(payload.url))
         _apply_extraction(posting, extracted)
         posting.company_id = await _resolve_company(db, extracted.company_name)
 
@@ -108,6 +109,7 @@ async def reparse_posting(posting_id: uuid.UUID, db: AsyncSession = Depends(get_
             detail="This posting has no stored raw text to re-parse",
         )
     extracted, _usage = await extract_posting(posting.raw_text)
+    _guard_not_a_posting(extracted, from_url=bool(posting.source_url))
     _apply_extraction(posting, extracted)
     if posting.company_id is None:
         posting.company_id = await _resolve_company(db, extracted.company_name)
@@ -150,6 +152,23 @@ async def _reload(db: AsyncSession, posting_id: uuid.UUID) -> JobPosting | None:
         select(JobPosting).options(_WITH_COMPANY).where(JobPosting.id == posting_id)
     )
     return result.scalar_one_or_none()
+
+
+def _guard_not_a_posting(extracted, *, from_url: bool) -> None:
+    """Refuse the extraction when the model says the text held no posting.
+
+    Storing it anyway would leave a record that looks like a real posting and
+    quietly poisons matching later on.
+    """
+    if extracted.is_job_posting:
+        return
+    detail = f"That text does not look like a job posting ({extracted.title})."
+    if from_url:
+        detail += (
+            " The page probably renders the posting in the browser -- open it "
+            "and paste the description instead."
+        )
+    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=detail)
 
 
 def _apply_extraction(posting: JobPosting, extracted) -> None:

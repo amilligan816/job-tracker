@@ -7,6 +7,7 @@ import ApplicationsPage from "./pages/ApplicationsPage";
 import CapturePage from "./pages/CapturePage";
 import CompaniesPage from "./pages/CompaniesPage";
 import DashboardPage from "./pages/DashboardPage";
+import EmailPage from "./pages/EmailPage";
 import ExperiencePage from "./pages/ExperiencePage";
 
 export default function App() {
@@ -20,6 +21,7 @@ export default function App() {
           <Route path="/applications/:id" element={<ApplicationDetailPage />} />
           <Route path="/capture" element={<CapturePage />} />
           <Route path="/companies" element={<CompaniesPage />} />
+          <Route path="/email" element={<EmailPage />} />
           <Route path="/experience" element={<ExperiencePage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

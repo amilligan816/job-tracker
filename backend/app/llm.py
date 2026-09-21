@@ -17,6 +17,7 @@ from app.schemas import (
     ChatTurnResult,
     ExtractedPosting,
     ImportedExperience,
+    MailVerdict,
     MatchAnalysis,
     TailoredResume,
 )
@@ -344,7 +345,13 @@ answer for a section the posting omits.
 - Keep list items short -- one requirement or responsibility per item, in the \
 posting's own words where possible.
 - `remote_type` is "remote" only if the role can be done fully remotely, \
-"hybrid" if it names both, "onsite" if it requires presence, else "unknown"."""
+"hybrid" if it names both, "onsite" if it requires presence, else "unknown".
+- Set `is_job_posting` false when the text is not a posting at all: a careers \
+page that lists no role, navigation and cookie/EEO boilerplate with no job in \
+it, a search results page, a login wall, an error page. Say so instead of \
+assembling a posting out of the page furniture -- an invented posting is worse \
+than none, because it looks real. When it is false, use `title` to say briefly \
+what the text actually was and leave the other fields empty."""
 
 
 async def extract_posting(raw_text: str) -> tuple[ExtractedPosting, Usage]:
@@ -461,3 +468,55 @@ async def draft_interview_prep(
     response = await _generate(_INTERVIEW_PREP_SYSTEM, prompt)
     return _text_of(response), _usage(response)
 
+
+# ------------------------------------------------------------------- mail triage
+
+_MAIL_SYSTEM = """You read one email and say what it means for a job application.
+
+You are the second opinion. Simple string matching already ran and was not \
+confident, which usually means the email is either ambiguous or phrased in a way \
+the phrase list does not cover.
+
+- Pick the candidate application the email is about by its index. If none of \
+them fit -- it is a job alert, a newsletter, an unrelated recruiter cold \
+email -- return null. A wrong match is worse than no match.
+- `status` is what the email says *has happened*, not what the candidate hopes. \
+Return null when the email carries no status change: acknowledgements of an \
+application already known to be submitted, scheduling logistics for an interview \
+already recorded, and general recruiter chatter are all null.
+- A rejection is a rejection however warmly it is phrased. "We've decided to \
+move forward with other candidates" is `rejected`.
+- An invitation to talk to a recruiter is `screening`. An invitation to a \
+technical, panel, or onsite interview is `interviewing`.
+- `confidence` is how sure you are, 0 to 1. Be honest; a 0.4 that is right is \
+more useful than a 0.9 that is guessed.
+- `reasoning` is one sentence quoting the email's own words."""
+
+
+async def classify_email(
+    *,
+    subject: str | None,
+    sender: str | None,
+    body: str | None,
+    candidates: list[str],
+) -> tuple[MailVerdict, Usage]:
+    """Adjudicate one email against a shortlist of applications.
+
+    `candidates` are pre-rendered one-line descriptions; the model answers with
+    an index into this list, so it cannot name an application that isn't there.
+    """
+    listing = "\n".join(f"[{i}] {line}" for i, line in enumerate(candidates)) or "(none)"
+    prompt = (
+        f"CANDIDATE APPLICATIONS\n----------------------\n{listing}\n\n"
+        f"EMAIL\n-----\nFrom: {sender or '(unknown)'}\n"
+        f"Subject: {subject or '(no subject)'}\n\n{_clip(body, 20_000)}"
+    )
+    response = await _client().messages.parse(
+        model=_model(),
+        max_tokens=EXTRACTION_MAX_TOKENS,
+        system=_MAIL_SYSTEM,
+        messages=[{"role": "user", "content": prompt}],
+        output_format=MailVerdict,
+    )
+    _guard_refusal(response)
+    return response.parsed_output, _usage(response)

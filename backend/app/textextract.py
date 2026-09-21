@@ -1,5 +1,6 @@
 """Turn uploaded files and fetched web pages into plain text for the assistant."""
 
+import html
 import io
 import logging
 import re
@@ -7,6 +8,8 @@ import re
 import httpx
 from fastapi.concurrency import run_in_threadpool
 from selectolax.parser import HTMLParser
+
+from app.ats import AtsPosting, resolve_posting
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +35,16 @@ def html_to_text(html: str) -> str:
 async def fetch_posting_text(url: str) -> str:
     """Fetch a job posting URL and reduce it to readable text.
 
-    Many boards render postings client-side; when that happens the text comes back
-    thin and the caller should fall back to a pasted description.
+    A career page that is only a shell around an ATS gets resolved through that
+    ATS's API first, because scraping the shell returns navigation and legal
+    boilerplate rather than the posting. Boards we cannot resolve that way are
+    scraped; when those render client-side the text comes back thin and the
+    caller should fall back to a pasted description.
     """
+    posting = await resolve_posting(url)
+    if posting is not None:
+        return _render_ats_posting(posting)
+
     async with httpx.AsyncClient(
         follow_redirects=True,
         timeout=20.0,
@@ -48,6 +58,22 @@ async def fetch_posting_text(url: str) -> str:
     if "html" in content_type:
         return html_to_text(content.decode(response.encoding or "utf-8", errors="replace"))
     return _collapse(content.decode("utf-8", errors="replace"))
+
+
+def _render_ats_posting(posting: AtsPosting) -> str:
+    """Flatten an ATS payload into the same shape of text a good scrape produces."""
+    header = [posting.title]
+    for label, value in (
+        ("Company", posting.company),
+        ("Location", posting.location),
+        ("Employment type", posting.employment_type),
+    ):
+        if value:
+            header.append(f"{label}: {value}")
+
+    # Greenhouse returns the description as HTML-escaped HTML.
+    body = html_to_text(html.unescape(posting.content_html))
+    return _collapse("\n".join(header) + "\n\n" + body)
 
 
 async def extract_document_text(data: bytes, content_type: str, filename: str) -> str | None:

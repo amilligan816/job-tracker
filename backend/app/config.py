@@ -31,6 +31,34 @@ class Settings(BaseSettings):
     anthropic_ambient_auth: bool = False
     anthropic_model: str = "claude-opus-5"
 
+    # ---------------------------------------------------------------- mail sync
+    # Gmail is read through a Google OAuth client you register yourself; with no
+    # client configured the mail routes report "not configured" rather than 503,
+    # since there is nothing transient about a missing client id.
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    # Where Google sends the user back. Must match the redirect URI registered on
+    # the OAuth client exactly, so it is spelled out rather than derived.
+    google_redirect_uri: str = "http://localhost:8000/api/mail/oauth/google/callback"
+    # Where the callback bounces the browser once the account is connected.
+    frontend_base_url: str = "http://localhost:5173"
+
+    # Fernet key encrypting OAuth tokens at rest. Required to connect a mailbox:
+    #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    mail_token_key: str = ""
+
+    # Background sync cadence. 0 disables the loop -- the manual "Sync now" button
+    # and the API still work.
+    mail_sync_interval_seconds: int = 900
+    # How far back the first sync of a mailbox reaches.
+    mail_lookback_days: int = 30
+    # Ceiling on one run, so a long-dormant mailbox can't turn into a huge job.
+    mail_max_messages_per_sync: int = 200
+    # Let Claude adjudicate emails the heuristics are unsure about.
+    mail_use_claude: bool = True
+    # Heuristic confidence at or above which Claude is not consulted.
+    mail_claude_confidence_floor: float = 0.75
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
@@ -40,6 +68,16 @@ class Settings(BaseSettings):
         return bool(
             self.anthropic_api_key or self.anthropic_auth_token or self.anthropic_ambient_auth
         )
+
+    @property
+    def gmail_configured(self) -> bool:
+        """Whether a mailbox can be connected at all.
+
+        The token key counts: without it we would have nowhere safe to put the
+        refresh token, and finding that out after the OAuth round trip is worse
+        than saying so up front.
+        """
+        return bool(self.google_client_id and self.google_client_secret and self.mail_token_key)
 
 
 @lru_cache
