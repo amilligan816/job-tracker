@@ -230,6 +230,11 @@ def to_pdf(title: str, blocks: list[Block], subtitle: str | None = None) -> byte
         spaceBefore=12,
         spaceAfter=4,
     )
+    # Deeper headings (a role under Experience) must not compete with the
+    # section title above them. docx already sizes by level; match it here.
+    subheading_style = ParagraphStyle(
+        "SubHead", parent=heading_style, fontSize=10.8, leading=14, spaceBefore=9, spaceAfter=2
+    )
 
     story: list = [Paragraph(_escape(title), title_style)]
     if subtitle:
@@ -268,7 +273,10 @@ def to_pdf(title: str, blocks: list[Block], subtitle: str | None = None) -> byte
             continue
 
         flush_list()
-        style = heading_style if block.kind == "heading" else body
+        if block.kind == "heading":
+            style = heading_style if block.level <= 2 else subheading_style
+        else:
+            style = body
         story.append(Paragraph(_markup(block.text), style))
 
     flush_list()
@@ -278,6 +286,56 @@ def to_pdf(title: str, blocks: list[Block], subtitle: str | None = None) -> byte
 
 # Long enough to stay descriptive, short enough for any filesystem.
 _MAX_NAME_CHARS = 90
+
+
+def resume_blocks(
+    *,
+    summary: str | None,
+    skills: list[str],
+    roles: list[dict],
+    education: list[dict],
+    sections: list[str],
+) -> list[Block]:
+    """Lay a resume out as blocks, so it renders through the same two renderers.
+
+    Company, title and dates arrive already resolved from the record -- nothing
+    here invents them.
+    """
+    blocks: list[Block] = []
+
+    for section in sections:
+        if section == "summary" and summary:
+            blocks.append(Block("heading", "Summary", 2))
+            blocks.append(Block("paragraph", summary))
+
+        elif section == "skills" and skills:
+            blocks.append(Block("heading", "Skills", 2))
+            blocks.append(Block("paragraph", " · ".join(skills)))
+
+        elif section == "experience" and roles:
+            blocks.append(Block("heading", "Experience", 2))
+            for role in roles:
+                header = f"{role['title']} — {role['company']}"
+                if role.get("location"):
+                    header += f" ({role['location']})"
+                if role.get("period"):
+                    header += f" | {role['period']}"
+                blocks.append(Block("heading", header, 3))
+                if role.get("summary"):
+                    blocks.append(Block("paragraph", role["summary"]))
+                blocks.extend(Block("bullet", text) for text in role.get("highlights", []))
+
+        elif section == "education" and education:
+            blocks.append(Block("heading", "Education", 2))
+            for item in education:
+                line = item["institution"]
+                if item.get("credential"):
+                    line = f"{item['credential']}, {line}"
+                if item.get("period"):
+                    line += f" | {item['period']}"
+                blocks.append(Block("bullet", line))
+
+    return blocks
 
 
 def default_filename(title: str, extension: str, subject: str | None = None) -> str:

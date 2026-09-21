@@ -299,6 +299,21 @@ export interface AssistantRun {
 
 export type ExportFormat = "docx" | "pdf";
 
+export interface ResumeTemplate {
+  id: string;
+  name: string;
+  is_default: boolean;
+  sections: string[];
+  options: Record<string, unknown>;
+}
+
+export interface ResumeBuildResult {
+  document: StoredDocument | null;
+  /** The rendered text, so it can be reviewed before downloading. */
+  preview: string;
+  tailored: boolean;
+}
+
 export interface AssistantStatus {
   enabled: boolean;
   model: string;

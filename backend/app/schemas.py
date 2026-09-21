@@ -411,6 +411,31 @@ class ResumeTemplateRead(ORMModel, ResumeTemplateBase):
     is_default: bool
 
 
+class TailoredRole(BaseModel):
+    """How one existing role should appear on a tailored resume.
+
+    Only the wording is the model's; the role is referenced by id so the company,
+    title and dates always come from the record and can never be invented.
+    """
+
+    role_id: uuid.UUID
+    include: bool = True
+    highlights: list[str] = Field(default_factory=list)
+
+
+class TailoredResume(BaseModel):
+    summary: str
+    skills: list[str] = Field(default_factory=list)
+    roles: list[TailoredRole] = Field(default_factory=list)
+
+
+class ResumeBuildResult(BaseModel):
+    document: "DocumentRead | None" = None
+    # The rendered text, so the UI can show it before anything is downloaded.
+    preview: str
+    tailored: bool
+
+
 class ResumeBuildRequest(BaseModel):
     application_id: uuid.UUID
     template_id: uuid.UUID | None = None
@@ -508,3 +533,4 @@ ApplicationDetail.model_rebuild()
 
 
 ResumeBuildRequest.model_rebuild()
+ResumeBuildResult.model_rebuild()

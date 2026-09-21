@@ -13,7 +13,13 @@ from functools import lru_cache
 import anthropic
 
 from app.config import get_settings
-from app.schemas import ChatTurnResult, ExtractedPosting, ImportedExperience, MatchAnalysis
+from app.schemas import (
+    ChatTurnResult,
+    ExtractedPosting,
+    ImportedExperience,
+    MatchAnalysis,
+    TailoredResume,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +187,57 @@ async def interview_turn(
         system=system,
         messages=[*history, {"role": "user", "content": message}],
         output_format=ChatTurnResult,
+    )
+    _guard_refusal(response)
+    return response.parsed_output, _usage(response)
+
+
+# --------------------------------------------------------------------- resume tailoring
+
+_TAILOR_SYSTEM = """You tailor a candidate's resume to one job posting.
+
+You are selecting and sharpening, not writing new history:
+- Every highlight must be traceable to something in the record. Rephrase for
+  emphasis and brevity; never add a metric, a technology, or a responsibility
+  that is not there.
+- Reference each role by its `role_id` exactly as given. Do not restate the
+  company, title or dates -- those come from the record, not from you.
+- Set `include: false` for a role that earns no space on this application, but
+  keep the recent and relevant ones even if the fit is partial. Never drop a
+  role in a way that creates an unexplained gap in the last ten years.
+- Order highlights within a role by relevance to this posting, strongest first,
+  and stay within the requested maximum.
+- The summary is two or three sentences, specific to this role, and must not
+  claim anything the record does not support."""
+
+
+async def tailor_resume(
+    experience: str,
+    posting_text: str,
+    role_catalogue: str,
+    max_highlights: int,
+) -> tuple[TailoredResume, Usage]:
+    """Choose and sharpen what goes on the resume for one posting."""
+    system = [
+        {"type": "text", "text": _TAILOR_SYSTEM},
+        {
+            "type": "text",
+            "text": f"The candidate's full record:\n\n{_clip(experience)}",
+            "cache_control": {"type": "ephemeral"},
+        },
+    ]
+    prompt = (
+        f"Roles you may include, with their ids:\n{role_catalogue}\n\n"
+        f"At most {max_highlights} highlights per role.\n\n"
+        f"JOB POSTING\n-----------\n{_clip(posting_text)}\n\n"
+        "Produce the tailored resume."
+    )
+    response = await _client().messages.parse(
+        model=_model(),
+        max_tokens=ANALYSIS_MAX_TOKENS,
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+        output_format=TailoredResume,
     )
     _guard_refusal(response)
     return response.parsed_output, _usage(response)

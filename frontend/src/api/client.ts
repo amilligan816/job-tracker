@@ -16,6 +16,8 @@ import type {
   ExportFormat,
   Highlight,
   ImportedExperience,
+  ResumeBuildResult,
+  ResumeTemplate,
   JobPosting,
   PipelineSummary,
   PostingMatch,
@@ -208,6 +210,16 @@ export const api = {
       }),
     removeEducation: (id: string) =>
       request<void>(`/experience/education/${id}`, { method: "DELETE" }),
+  },
+
+  resumes: {
+    templates: () => request<ResumeTemplate[]>("/resumes/templates"),
+    build: (body: {
+      application_id: string;
+      template_id?: string;
+      tailor: boolean;
+      export_format?: ExportFormat;
+    }) => request<ResumeBuildResult>("/resumes/build", { method: "POST", body: JSON.stringify(body) }),
   },
 
   assistant: {

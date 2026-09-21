@@ -29,39 +29,40 @@ other local projects. Change them in `.env`.
 The backend applies migrations on start, and `minio-init` creates the bucket, so
 a fresh `docker compose up` gives you a working stack with no extra steps.
 
-## Resumes
+## Experience
 
-Documents are grouped by what they are for:
+There is no stored base resume. The candidate's career lives as structured data
+— roles with achievement highlights, deeper stories, and education — and a
+resume is *rendered* from it on demand.
 
-- **Base resumes** — your master resumes. One is marked as *the* base (the star
-  on the Documents page); it is what tailored resumes are written from and the
-  fallback for any application without one.
-- **Tailored resumes** — a version written for one application, optionally
-  recording which base it came from.
-- **Cover letters, portfolios, offer letters, other** — everything else.
+Two ways to fill it:
 
-When something needs "the resume" for an application it resolves, in order: a
-resume you named explicitly, the tailored resume for that application, the
-designated base resume, then the most recent base resume.
+- **Import a resume.** PDF, Word, text or markdown is read, Claude structures
+  it, and you review before anything is saved. The file itself is not kept.
+  Importing again appends, and skips roles or education already recorded, so
+  re-importing the same resume is a no-op rather than a doubled history.
+- **Talk it through.** The *Deepen it* tab interviews you about what you
+  actually did — scope, constraints, the decision and why, what went wrong.
+  When a complete story emerges it is proposed for approval; nothing is saved
+  silently.
 
-### File formats
+One plain-text rendering of the record serves both the matcher and the
+assistant, so a match score and a cover letter can never disagree about your
+history. The *What the model sees* tab shows that exact text.
 
-PDF, Word (`.docx`), plain text, markdown and HTML uploads are all read for
-their text, which is what the match rating and the assistant work from. Word
-files laid out in tables — a very common resume pattern — are read from the
-table cells too, not just the paragraphs. Legacy `.doc` is a different binary
-format: the file stores and downloads fine, but nothing can read it, and the
-Documents page flags it as "No text".
+## Generating a resume
 
-### Exporting
+From an application, a resume is built from the record and a template.
 
-Anything the assistant generates — cover letter, interview prep, match
-analysis — exports to **Word or PDF** from the buttons on the result. Both
-formats render from one parsed block model, so they are structurally identical
-rather than two separate best-efforts, and the on-screen preview uses the same
-markup rules. Exports are filed under Documents against the application, named
-with the role so a day of exporting doesn't produce a folder of identical
-filenames.
+- **Untailored** is a straight render — no model call, instant and free.
+- **Tailored** asks Claude to select and sharpen the highlights for that
+  posting. It references roles by id, so companies, titles and dates always
+  come from your record; a role id the model invents is dropped rather than
+  rendered. It is told to rephrase, never to add a metric or technology the
+  record does not contain.
+
+Output goes to PDF or Word through the same renderer as everything else, and is
+filed against the application.
 
 ## Match rating (no AI)
 
@@ -118,14 +119,15 @@ backend/          FastAPI service
     models.py     SQLAlchemy tables
     schemas.py    Pydantic request/response models
     storage.py    MinIO object storage
+    experience.py the career record and its text rendering
     matching.py   deterministic match rating
     skills.py     skill vocabulary (plain data)
-    resumes.py    which resume applies to an application
+    render.py     .docx / .pdf rendering
     llm.py        Claude integration
     textextract.py  PDF/HTML -> text
     routers/      companies, postings, applications, documents, assistant
   alembic/        migrations
-  tests/          matcher unit tests
+  tests/          matcher, renderer and experience tests
 frontend/         Vite + React + MUI SPA
 infra/            Postgres + MinIO compose file
 docker-compose.yml  full stack (includes infra/)
@@ -159,6 +161,25 @@ After changing `backend/app/models.py`:
 ```bash
 cd backend && uv run alembic revision --autogenerate -m "describe the change"
 ```
+
+## Why no vector search
+
+The corpus here is one person's career — on the order of 20–30k tokens fully
+written out. That fits in context many times over, so retrieval would solve a
+problem this app does not have, and would actively hurt the main job: "which of
+my stories fits this posting" is a comparison across everything, and top-k
+retrieval answers it by discarding most candidates before the model sees them.
+
+The cost of resending the record is handled by prompt caching instead — it is
+stable across a conversation, so it sits behind a cache breakpoint in the
+system prompt. Worth revisiting only if the record passes ~100k tokens or this
+goes multi-user.
+
+## Troubleshooting
+
+**A frontend edit doesn't show up.** Vite's transform cache in the container can
+go stale even though the bind mount has the new file. `docker compose restart
+frontend` clears it.
 
 ## Storage notes
 

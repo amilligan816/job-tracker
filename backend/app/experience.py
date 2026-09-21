@@ -57,13 +57,20 @@ async def load_profile(db: AsyncSession, profile_id: uuid.UUID) -> ExperiencePro
     return result.scalar_one()
 
 
-def _format_period(start: date | None, end: date | None) -> str:
-    if not start and not end:
-        return ""
+def format_period(start: date | None, end: date | None) -> str:
+    """A readable date range, degrading gracefully when one end is missing.
+
+    A lone "?" reads as sloppy on a rendered resume, so a missing start shows
+    just the end date rather than a range with a hole in it.
+    """
     fmt = "%b %Y"
-    left = start.strftime(fmt) if start else "?"
-    right = end.strftime(fmt) if end else "Present"
-    return f"{left} – {right}"
+    if start and end:
+        return f"{start.strftime(fmt)} – {end.strftime(fmt)}"
+    if start:
+        return f"{start.strftime(fmt)} – Present"
+    if end:
+        return end.strftime(fmt)
+    return ""
 
 
 def is_empty(profile: ExperienceProfile) -> bool:
@@ -104,7 +111,7 @@ def experience_text(profile: ExperienceProfile, *, include_stories: bool = True)
     if profile.roles:
         parts.extend(["", "EXPERIENCE"])
         for role in profile.roles:
-            period = _format_period(role.start_date, role.end_date)
+            period = format_period(role.start_date, role.end_date)
             header = f"{role.title} — {role.company}"
             if role.location:
                 header += f" ({role.location})"
@@ -131,7 +138,7 @@ def experience_text(profile: ExperienceProfile, *, include_stories: bool = True)
             line = item.institution
             if item.credential:
                 line = f"{item.credential}, {line}"
-            period = _format_period(item.start_date, item.end_date)
+            period = format_period(item.start_date, item.end_date)
             if period:
                 line += f" | {period}"
             parts.append(line)

@@ -23,6 +23,7 @@ import { APPLICATION_STATUSES, type ApplicationStatus } from "../api/types";
 import AssistantPanel from "../components/AssistantPanel";
 import ApplicationFiles from "../components/ApplicationFiles";
 import MatchCard from "../components/MatchCard";
+import ResumeBuilder from "../components/ResumeBuilder";
 import QueryState from "../components/QueryState";
 import StatusChip from "../components/StatusChip";
 import { STATUS_META } from "../theme";
@@ -200,6 +201,8 @@ export default function ApplicationDetailPage() {
                   </Card>
 
                   <MatchCard applicationId={id} />
+
+                  <ResumeBuilder applicationId={id} />
 
                   {data.posting?.extracted && <PostingFacts extracted={data.posting.extracted} />}
 
