@@ -64,6 +64,7 @@ def _render_ats_posting(posting: AtsPosting) -> str:
     header = [posting.title]
     for label, value in (
         ("Company", posting.company),
+        ("Hiring entity", posting.hiring_entity),
         ("Location", posting.location),
         ("Workplace", posting.workplace),
         ("Employment type", posting.employment_type),

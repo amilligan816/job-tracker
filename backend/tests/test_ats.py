@@ -19,6 +19,8 @@ from app.ats import (
     _lever_posting,
     _lever_target,
     _org_candidates,
+    _workday_posting,
+    _workday_target,
     resolve_posting,
 )
 from app.textextract import _render_ats_posting
@@ -28,6 +30,10 @@ BILLTRUST_URL = (
     "?gh_jid=7826842003&source=billtrust&gh_src=null"
 )
 JOB_UUID = "d3bc1ced-3ce4-4086-a050-555055dbb1ff"
+ZILLOW_URL = (
+    "https://zillow.wd5.myworkdayjobs.com/Zillow_Group_External/job/Remote-USA"
+    "/Software-Development-Engineer_P748929-1?source=LinkedIn"
+)
 
 GREENHOUSE_JSON = {
     "title": "Senior Software Engineer",
@@ -54,6 +60,26 @@ LEVER_JSON = {
     ],
     "additional": "<div>We are an equal opportunity employer.</div>",
     "hostedUrl": f"https://jobs.lever.co/leverdemo/{JOB_UUID}",
+}
+
+WORKDAY_JSON = {
+    "hiringOrganization": {"name": "ZINC Zillow, Inc.", "url": ""},
+    "jobPostingInfo": {
+        "title": "Software Development Engineer",
+        "location": "Remote-USA",
+        "timeType": "Full time",
+        "remoteType": "Remote",
+        "jobReqId": "P748929",
+        # Workday double-encodes: `&amp;#xa;` is an escaped newline entity.
+        "jobDescription": (
+            "<h2>About the team</h2><p>Build things.</p>"
+            "&amp;#xa;&amp;#xa;<p>Base pay $136,300.00 - $217,700.00 annually.</p>"
+        ),
+        "externalUrl": (
+            "https://zillow.wd5.myworkdayjobs.com/Zillow_Group_External/job/Remote-USA"
+            "/Software-Development-Engineer_P748929-1"
+        ),
+    },
 }
 
 ASHBY_JSON = {
@@ -93,14 +119,15 @@ def json_route(routes: dict[str, dict]):
 
 
 def test_greenhouse_job_id_comes_from_the_gh_jid_parameter():
-    orgs, job_id = _greenhouse_target(BILLTRUST_URL)
+    endpoints, job_id = _greenhouse_target(BILLTRUST_URL)
     assert job_id == "7826842003"
-    assert orgs[0] == "billtrust"
+    assert endpoints[0] == "https://boards-api.greenhouse.io/v1/boards/billtrust/jobs/7826842003"
 
 
 def test_host_supplies_an_org_guess_when_the_query_string_does_not():
-    orgs, job_id = _greenhouse_target("https://careers.acme.io/openings?gh_jid=42")
-    assert (orgs, job_id) == (["acme"], "42")
+    endpoints, job_id = _greenhouse_target("https://careers.acme.io/openings?gh_jid=42")
+    assert job_id == "42"
+    assert endpoints == ["https://boards-api.greenhouse.io/v1/boards/acme/jobs/42"]
 
 
 def test_placeholder_parameter_values_are_not_treated_as_tokens():
@@ -109,31 +136,73 @@ def test_placeholder_parameter_values_are_not_treated_as_tokens():
 
 
 def test_a_direct_greenhouse_url_needs_no_guessing():
-    assert _greenhouse_target("https://job-boards.greenhouse.io/acme/jobs/991") == (["acme"], "991")
+    endpoints, job_id = _greenhouse_target("https://job-boards.greenhouse.io/acme/jobs/991")
+    assert job_id == "991"
+    assert endpoints == ["https://boards-api.greenhouse.io/v1/boards/acme/jobs/991"]
 
 
 def test_lever_reads_the_site_and_uuid_out_of_the_path():
-    assert _lever_target(f"https://jobs.lever.co/leverdemo/{JOB_UUID}") == (
-        ["leverdemo"],
-        JOB_UUID,
-    )
+    endpoints, job_id = _lever_target(f"https://jobs.lever.co/leverdemo/{JOB_UUID}")
+    assert job_id == JOB_UUID
+    assert endpoints == [f"https://api.lever.co/v0/postings/leverdemo/{JOB_UUID}"]
 
 
 def test_lever_tolerates_the_apply_suffix():
-    orgs, job_id = _lever_target(f"https://jobs.lever.co/leverdemo/{JOB_UUID}/apply")
-    assert (orgs, job_id) == (["leverdemo"], JOB_UUID)
+    endpoints, job_id = _lever_target(f"https://jobs.lever.co/leverdemo/{JOB_UUID}/apply")
+    assert job_id == JOB_UUID
+    assert endpoints == [f"https://api.lever.co/v0/postings/leverdemo/{JOB_UUID}"]
 
 
 def test_ashby_reads_the_org_and_uuid_out_of_the_path():
-    assert _ashby_target(f"https://jobs.ashbyhq.com/linear/{JOB_UUID}/application") == (
-        ["linear"],
-        JOB_UUID,
-    )
+    endpoints, job_id = _ashby_target(f"https://jobs.ashbyhq.com/linear/{JOB_UUID}/application")
+    assert job_id == JOB_UUID
+    assert endpoints == [
+        "https://api.ashbyhq.com/posting-api/job-board/linear?includeCompensation=true"
+    ]
 
 
 def test_ashby_embedded_on_a_company_page_guesses_the_org_from_the_host():
-    orgs, job_id = _ashby_target(f"https://careers.acme.com/roles?ashby_jid={JOB_UUID}")
-    assert (orgs, job_id) == (["acme"], JOB_UUID)
+    endpoints, job_id = _ashby_target(f"https://careers.acme.com/roles?ashby_jid={JOB_UUID}")
+    assert job_id == JOB_UUID
+    assert endpoints == [
+        "https://api.ashbyhq.com/posting-api/job-board/acme?includeCompensation=true"
+    ]
+
+
+# ------------------------------------------------------------------- workday targets
+
+
+def test_workday_builds_the_cxs_endpoint_from_the_host_and_path():
+    endpoints, job_id = _workday_target(ZILLOW_URL)
+    assert job_id == "Remote-USA/Software-Development-Engineer_P748929-1"
+    # Tenant from the first host label, site from the segment before `job`, and
+    # no trailing slash -- Workday answers 406 to one.
+    assert endpoints == [
+        "https://zillow.wd5.myworkdayjobs.com/wday/cxs/zillow/Zillow_Group_External"
+        "/job/Remote-USA/Software-Development-Engineer_P748929-1"
+    ]
+
+
+def test_workday_skips_an_optional_locale_segment():
+    endpoints, _ = _workday_target(
+        "https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/US-CA/Eng_JR1"
+    )
+    assert endpoints == [
+        "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite"
+        "/job/US-CA/Eng_JR1"
+    ]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://zillow.wd5.myworkdayjobs.com/Zillow_Group_External",  # board index
+        "https://zillow.wd5.myworkdayjobs.com/job/Remote-USA",  # no site segment
+        "https://zillow.wd5.myworkdayjobs.com/Site/job",  # no job path
+    ],
+)
+def test_a_workday_url_that_is_not_a_posting_is_declined(url):
+    assert _workday_target(url) == ([], None)
 
 
 @pytest.mark.parametrize(
@@ -298,6 +367,49 @@ def test_ashby_joins_secondary_locations_into_one_line():
 
 def test_an_ashby_job_with_no_description_is_not_a_posting():
     assert _ashby_posting({**ASHBY_JSON, "descriptionHtml": ""}) is None
+
+
+# ---------------------------------------------------------------------- workday fetch
+
+
+async def test_workday_resolves_a_posting_through_the_cxs_endpoint():
+    async with transport(json_route({"/wday/cxs/": WORKDAY_JSON})) as client:
+        posting = await resolve_posting(ZILLOW_URL, client)
+
+    assert posting is not None
+    assert posting.ats == "workday"
+    assert posting.title == "Software Development Engineer"
+    assert posting.location == "Remote-USA"
+    assert posting.employment_type == "Full time"
+    assert posting.workplace == "Remote"
+
+
+def test_workday_keeps_the_payroll_entity_out_of_the_company_field():
+    # "ZINC Zillow, Inc." is an internal entity, not a name to file a company
+    # under -- report it as context and let the description supply the real one.
+    posting = _workday_posting(WORKDAY_JSON)
+    assert posting.company is None
+    assert posting.hiring_entity == "ZINC Zillow, Inc."
+
+
+def test_workday_double_encoded_entities_do_not_survive_into_the_text():
+    text = _render_ats_posting(_workday_posting(WORKDAY_JSON))
+    assert "&#xa;" not in text
+    assert "&amp;" not in text
+    assert "Hiring entity: ZINC Zillow, Inc." in text
+    assert "Base pay $136,300.00 - $217,700.00 annually." in text
+
+
+@pytest.mark.parametrize(
+    "info",
+    [{"title": "Engineer", "jobDescription": ""}, {"title": "", "jobDescription": "<p>x</p>"}],
+)
+def test_a_workday_payload_missing_title_or_description_is_not_a_posting(info):
+    assert _workday_posting({"jobPostingInfo": info}) is None
+
+
+def test_a_workday_payload_with_no_posting_info_is_declined():
+    assert _workday_posting({"hiringOrganization": {"name": "Acme"}}) is None
 
 
 # ------------------------------------------------------------------------ rendering

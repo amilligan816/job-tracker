@@ -40,7 +40,7 @@ posting itself is fetched by JavaScript after load. Scraping one of those is
 *worse* than fetching nothing — a page of footer text still looks like content,
 so the extractor assembles a "posting" out of the legal small print.
 
-So `app/ats.py` goes to the ATS instead, for the three that publish postings over
+So `app/ats.py` goes to the ATS instead, for the four that publish postings over
 a public JSON API:
 
 | ATS | URLs it recognises | Endpoint |
@@ -48,19 +48,35 @@ a public JSON API:
 | Greenhouse | any URL with `gh_jid`, plus `*.greenhouse.io/<org>/jobs/<id>` | per-job |
 | Lever | `jobs.lever.co/<site>/<uuid>` | per-job |
 | Ashby | `jobs.ashbyhq.com/<org>/<uuid>`, plus any URL with `ashby_jid` | whole board, filtered |
+| Workday | `<tenant>.<dc>.myworkdayjobs.com/[locale/]<site>/job/<path>` | per-job |
 
-A board is addressed by a short token (`billtrust`) that an embedding page need
-not state anywhere machine-readable — Billtrust passes it in `source` and reads
-it back in its own inline script. So the resolver collects plausible tokens from
-the query string and the hostname and lets the API adjudicate: a wrong guess is a
-404, and the first usable answer wins. Anything it cannot resolve falls back to
-scraping, which is right for a career page that really does serve HTML.
+Each adapter turns a URL into the API endpoints worth trying and a parser for
+what comes back. Endpoints rather than org tokens, because Workday's is built
+from the host, tenant, site and path all at once.
 
-Two notes on what the APIs give you. Ashby has no per-job endpoint, so its board
-is pulled and filtered by id under a size ceiling. Neither Lever nor Ashby names
-the company anywhere in its payload, so that field is left empty rather than
-guessed from the URL token — the description almost always names the company and
-the extractor picks it up from there.
+For the board-token boards, that token (`billtrust`) is something an embedding
+page need not state anywhere machine-readable — Billtrust passes it in `source`
+and reads it back in its own inline script. So the resolver collects plausible
+tokens from the query string and the hostname and lets the API adjudicate: a
+wrong guess is a 404, and the first usable answer wins. Anything it cannot
+resolve falls back to scraping, which is right for a career page that really
+does serve HTML.
+
+Four notes on what the APIs actually give you:
+
+- **Ashby has no per-job endpoint.** The board is pulled and filtered by id,
+  under a size ceiling — a mid-size board is already megabytes.
+- **Lever splits a posting across fields.** `description` is only the intro; the
+  requirements live in a `lists` array that has to be reassembled, or the posting
+  loses what makes it matchable.
+- **Greenhouse and Workday double-encode** their descriptions, so each unescapes
+  in its own adapter and the shared renderer sees real markup from all four.
+- **Company names are unreliable.** Lever and Ashby omit them; Workday gives the
+  payroll entity (`ZINC Zillow, Inc.`, `2100 NVIDIA USA`), which is not a name to
+  file a company under. Workday's is reported as `Hiring entity` for context and
+  the field is otherwise left empty — the description names the company and the
+  extractor reads it from there. That Zillow posting comes back as *Zillow
+  Group*, not *ZINC Zillow, Inc.*
 
 When a page cannot be resolved *and* scrapes to boilerplate, the extractor says
 so via `is_job_posting` and the capture is refused with a 422 telling you to paste

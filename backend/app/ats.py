@@ -7,14 +7,15 @@ fetching nothing, because a page of footer text still looks like content -- the
 extractor will dutifully assemble a "posting" out of the legal small print.
 
 Where the ATS publishes the same posting over a public JSON API, we ask it
-directly instead of scraping the shell. Greenhouse, Lever and Ashby all do.
+directly instead of scraping the shell. Greenhouse, Lever, Ashby and Workday
+all do.
 """
 
 import html
 import json
 import logging
 import re
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlparse
 
@@ -25,6 +26,9 @@ logger = logging.getLogger(__name__)
 _GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards/{org}/jobs/{job_id}"
 _LEVER_API = "https://api.lever.co/v0/postings/{org}/{job_id}"
 _ASHBY_API = "https://api.ashbyhq.com/posting-api/job-board/{org}?includeCompensation=true"
+# Workday's candidate-experience service mirrors the page the browser renders.
+_WORKDAY_API = "https://{host}/wday/cxs/{tenant}/{site}/job/{path}"
+_WORKDAY_HOSTS = ("myworkdayjobs.com", "myworkdaysite.com")
 
 # An ATS board is addressed by a short token ("billtrust"), which an embedding
 # page does not have to state anywhere machine-readable -- Billtrust, for one,
@@ -37,6 +41,8 @@ _MAX_ORG_GUESSES = 4
 # whole board, which is already megabytes for a mid-size company. Read it with a
 # ceiling so a very large employer cannot make us buffer the heap.
 _MAX_JSON_BYTES = 8 * 1024 * 1024
+
+_USER_AGENT = "job-tracker/0.1 (+personal job search assistant)"
 
 # Subdomains and suffixes that are never the org token.
 _GENERIC_LABELS = frozenset(
@@ -63,14 +69,20 @@ class AtsPosting:
     employment_type: str | None
     content_html: str
     ats: str
+    hiring_entity: str | None = None
     workplace: str | None = None
     compensation: str | None = None
     canonical_url: str | None = None
 
 
-# A resolver reads a URL and, when it recognises one, fetches the posting.
+# A target reads a URL and, when it recognises one, returns the API endpoints
+# worth trying (most explicit first) plus the job to pick out of the answer.
+# Returning endpoints rather than org tokens is what lets Workday take part: its
+# endpoint is built from the host, tenant, site and path all at once.
 _Target = Callable[[str], tuple[list[str], str | None]]
-_Fetch = Callable[[httpx.AsyncClient, list[str], str], Awaitable[AtsPosting | None]]
+# Most parsers get a single job back and ignore `job_id`; Ashby returns a whole
+# board and needs it to find the row.
+_Parse = Callable[[dict, str], AtsPosting | None]
 
 
 async def resolve_posting(url: str, client: httpx.AsyncClient | None = None) -> AtsPosting | None:
@@ -80,14 +92,32 @@ async def resolve_posting(url: str, client: httpx.AsyncClient | None = None) -> 
     back to scraping the page, which is the right answer for a career page that
     really does serve its postings as HTML.
     """
-    for target, fetch in _RESOLVERS:
-        orgs, job_id = target(url)
-        if not job_id or not orgs:
+    for target, parse in _RESOLVERS:
+        endpoints, job_id = target(url)
+        if not job_id or not endpoints:
             continue
         if client is not None:
-            return await fetch(client, orgs, job_id)
-        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as owned:
-            return await fetch(owned, orgs, job_id)
+            return await _fetch(client, endpoints, job_id, parse)
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=15.0,
+            headers={"User-Agent": _USER_AGENT},
+        ) as owned:
+            return await _fetch(owned, endpoints, job_id, parse)
+    return None
+
+
+async def _fetch(
+    client: httpx.AsyncClient, endpoints: list[str], job_id: str, parse: _Parse
+) -> AtsPosting | None:
+    """Try each candidate endpoint until one yields a posting."""
+    for endpoint in endpoints:
+        data = await _get_json(client, endpoint)
+        if not isinstance(data, dict) and not isinstance(data, list):
+            continue
+        posting = parse(data, job_id)
+        if posting is not None:
+            return posting
     return None
 
 
@@ -103,30 +133,21 @@ def _greenhouse_target(url: str) -> tuple[list[str], str | None]:
     if host.endswith("greenhouse.io"):
         match = _GREENHOUSE_PATH.match(parsed.path)
         if match:
-            return [match["org"]], match["job_id"]
+            return _greenhouse_endpoints([match["org"]], match["job_id"])
         # The embed form: /embed/job_app?for=acme&token=123
-        return _org_candidates(params, host), _first(params, "token", "gh_jid")
+        job_id = _first(params, "token", "gh_jid")
+        return _greenhouse_endpoints(_org_candidates(params, host), job_id)
 
-    job_id = _first(params, "gh_jid")
+    return _greenhouse_endpoints(_org_candidates(params, host), _first(params, "gh_jid"))
+
+
+def _greenhouse_endpoints(orgs: list[str], job_id: str | None) -> tuple[list[str], str | None]:
     if not job_id:
         return [], None
-    return _org_candidates(params, host), job_id
+    return [_GREENHOUSE_API.format(org=org, job_id=job_id) for org in orgs], job_id
 
 
-async def _greenhouse_fetch(
-    client: httpx.AsyncClient, orgs: list[str], job_id: str
-) -> AtsPosting | None:
-    for org in orgs:
-        data = await _get_json(client, _GREENHOUSE_API.format(org=org, job_id=job_id))
-        if not isinstance(data, dict):
-            continue
-        posting = _greenhouse_posting(data)
-        if posting is not None:
-            return posting
-    return None
-
-
-def _greenhouse_posting(data: dict) -> AtsPosting | None:
+def _greenhouse_posting(data: dict, job_id: str = "") -> AtsPosting | None:
     title = (data.get("title") or "").strip()
     content = data.get("content") or ""
     if not title or not content:
@@ -171,23 +192,11 @@ def _lever_target(url: str) -> tuple[list[str], str | None]:
     match = _ORG_UUID_PATH.match(parsed.path)
     if not match:
         return [], None
-    return [match["org"]], match["job_id"]
+    job_id = match["job_id"]
+    return [_LEVER_API.format(org=match["org"], job_id=job_id)], job_id
 
 
-async def _lever_fetch(
-    client: httpx.AsyncClient, orgs: list[str], job_id: str
-) -> AtsPosting | None:
-    for org in orgs:
-        data = await _get_json(client, _LEVER_API.format(org=org, job_id=job_id))
-        if not isinstance(data, dict):
-            continue
-        posting = _lever_posting(data)
-        if posting is not None:
-            return posting
-    return None
-
-
-def _lever_posting(data: dict) -> AtsPosting | None:
+def _lever_posting(data: dict, job_id: str = "") -> AtsPosting | None:
     title = (data.get("text") or "").strip()
     if not title:
         return None
@@ -242,39 +251,31 @@ def _ashby_target(url: str) -> tuple[list[str], str | None]:
     if host.endswith("ashbyhq.com"):
         match = _ORG_UUID_PATH.match(parsed.path)
         if match:
-            return [match["org"]], match["job_id"]
-        return _org_candidates(params, host), _first(params, "ashby_jid")
+            return _ashby_endpoints([match["org"]], match["job_id"])
+        return _ashby_endpoints(_org_candidates(params, host), _first(params, "ashby_jid"))
 
-    job_id = _first(params, "ashby_jid")
+    return _ashby_endpoints(_org_candidates(params, host), _first(params, "ashby_jid"))
+
+
+def _ashby_endpoints(orgs: list[str], job_id: str | None) -> tuple[list[str], str | None]:
     if not job_id:
         return [], None
-    return _org_candidates(params, host), job_id
+    return [_ASHBY_API.format(org=org) for org in orgs], job_id
 
 
-async def _ashby_fetch(
-    client: httpx.AsyncClient, orgs: list[str], job_id: str
-) -> AtsPosting | None:
-    """Ashby publishes no per-job endpoint, so pull the board and pick the job out."""
-    for org in orgs:
-        data = await _get_json(client, _ASHBY_API.format(org=org))
-        if not isinstance(data, dict):
-            continue
-        jobs = data.get("jobs")
-        if not isinstance(jobs, list):
-            continue
-        for job in jobs:
-            if isinstance(job, dict) and job.get("id") == job_id:
-                posting = _ashby_posting(job)
-                if posting is not None:
-                    return posting
-        # The board resolved but holds no such job: a later org guess will not
-        # help, and the job is most likely closed.
-        logger.info("Ashby board %r does not list job %s", org, job_id)
+def _ashby_board(board: dict, job_id: str) -> AtsPosting | None:
+    """Ashby publishes no per-job endpoint, so pick the job out of the whole board."""
+    jobs = board.get("jobs")
+    if not isinstance(jobs, list):
         return None
+    for job in jobs:
+        if isinstance(job, dict) and job.get("id") == job_id:
+            return _ashby_posting(job)
+    logger.info("Ashby board does not list job %s", job_id)
     return None
 
 
-def _ashby_posting(job: dict) -> AtsPosting | None:
+def _ashby_posting(job: dict, job_id: str = "") -> AtsPosting | None:
     title = (job.get("title") or "").strip()
     content = job.get("descriptionHtml") or ""
     if not title or not content:
@@ -309,12 +310,79 @@ def _ashby_posting(job: dict) -> AtsPosting | None:
     )
 
 
+# ---------------------------------------------------------------------------- workday
+
+
+def _workday_target(url: str) -> tuple[list[str], str | None]:
+    """Map a Workday careers URL onto its candidate-experience endpoint.
+
+    A posting lives at `<tenant>.<datacentre>.myworkdayjobs.com/[locale/]<site>/
+    job/<location>/<slug>`, and the JSON behind it at `/wday/cxs/<tenant>/<site>/
+    job/<location>/<slug>`. The tenant is the first label of the host, and the
+    site is whatever segment precedes `job` -- found by position rather than
+    index, because the locale segment is optional.
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host.endswith(_WORKDAY_HOSTS):
+        return [], None
+
+    parts = [part for part in parsed.path.split("/") if part]
+    if "job" not in parts:
+        return [], None
+    marker = parts.index("job")
+    if marker == 0 or marker == len(parts) - 1:
+        return [], None
+
+    path = "/".join(parts[marker + 1 :])
+    endpoint = _WORKDAY_API.format(
+        host=host,
+        tenant=host.split(".")[0],
+        site=parts[marker - 1],
+        # Workday answers 406 to a trailing slash, so the path is joined bare.
+        path=path,
+    )
+    return [endpoint], path
+
+
+def _workday_posting(data: dict, job_id: str = "") -> AtsPosting | None:
+    info = data.get("jobPostingInfo")
+    if not isinstance(info, dict):
+        return None
+    title = (info.get("title") or "").strip()
+    content = info.get("jobDescription") or ""
+    if not title or not content:
+        return None
+
+    organization = data.get("hiringOrganization")
+    entity = organization.get("name") if isinstance(organization, dict) else None
+
+    return AtsPosting(
+        title=title,
+        # `hiringOrganization` is the payroll entity -- "ZINC Zillow, Inc.",
+        # "2100 NVIDIA USA" -- not a name anyone would file the company under, and
+        # not what the extractor should key a Company row on. Pass it as context
+        # instead and let the description supply the real name.
+        company=None,
+        hiring_entity=entity or None,
+        location=info.get("location") or None,
+        employment_type=info.get("timeType") or None,
+        # Workday double-encodes parts of its description, so `&amp;#xa;` would
+        # otherwise survive into the text as a literal "&#xa;".
+        content_html=html.unescape(content),
+        ats="workday",
+        workplace=info.get("remoteType") or None,
+        canonical_url=info.get("externalUrl") or None,
+    )
+
+
 # ---------------------------------------------------------------------------- shared
 
-_RESOLVERS: tuple[tuple[_Target, _Fetch], ...] = (
-    (_greenhouse_target, _greenhouse_fetch),
-    (_lever_target, _lever_fetch),
-    (_ashby_target, _ashby_fetch),
+_RESOLVERS: tuple[tuple[_Target, _Parse], ...] = (
+    (_greenhouse_target, _greenhouse_posting),
+    (_lever_target, _lever_posting),
+    (_ashby_target, _ashby_board),
+    (_workday_target, _workday_posting),
 )
 
 
