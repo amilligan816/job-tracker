@@ -92,13 +92,41 @@ Run the tests with `cd backend && uv run pytest`.
 
 ## Enabling the assistant
 
-The app runs fully without an API key — the assistant routes return 503 and the
-UI shows a notice instead. To turn the features on:
+The app runs without a Claude credential — those routes return 503 and the UI
+says so. Match ratings, untailored resumes and all tracking still work.
+
+To turn the features on, use a **Console API key**, which is the supported way
+to authenticate an application:
 
 ```bash
-# in .env
+# in .env — from https://console.anthropic.com/settings/keys
 ANTHROPIC_API_KEY=sk-ant-...
 ```
+
+A **Claude Pro/Max subscription is not an API credential** and cannot be used
+here. It authorizes you to use Claude's own apps, not to act as a backend for
+another service, and there is no supported path to point the Messages API at
+it. The two are billed separately.
+
+Two other credential sources are honoured if your setup uses them —
+`ANTHROPIC_AUTH_TOKEN` for an OAuth access token, and `ANTHROPIC_AMBIENT_AUTH=true`
+to let the SDK find an `ant auth login` profile or workload identity on disk.
+In Docker the profile has to be mounted in as well:
+
+```yaml
+# docker-compose.yml, under the backend service
+volumes:
+  - ~/.config/anthropic:/root/.config/anthropic:ro
+```
+
+### Roughly what it costs
+
+Per application, working it fully (posting extraction, match analysis, a cover
+letter, interview prep, a tailored resume) lands around **$0.30–0.50** on
+`claude-opus-5` at $5/$25 per MTok. Prompt caching takes a chunk off that,
+since the experience record is resent on every call and is cached.
+`ANTHROPIC_MODEL` accepts `claude-sonnet-5` or `claude-haiku-4-5` if you want
+that lower.
 
 Then `docker compose up -d --build backend`. This unlocks:
 

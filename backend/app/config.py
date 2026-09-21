@@ -21,8 +21,14 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
     log_level: str = "INFO"
 
-    # Assistant features are optional; without a key the /assistant routes 503.
+    # Assistant features are optional; with no credential the routes 503.
     anthropic_api_key: str = ""
+    # An OAuth access token, for setups that authenticate that way instead.
+    anthropic_auth_token: str = ""
+    # Set when the credential lives somewhere the SDK finds on its own -- an
+    # `ant auth login` profile on disk, or workload identity federation. We
+    # can't detect those cheaply, so this says "trust the SDK's own lookup".
+    anthropic_ambient_auth: bool = False
     anthropic_model: str = "claude-opus-5"
 
     @property
@@ -31,7 +37,9 @@ class Settings(BaseSettings):
 
     @property
     def assistant_enabled(self) -> bool:
-        return bool(self.anthropic_api_key)
+        return bool(
+            self.anthropic_api_key or self.anthropic_auth_token or self.anthropic_ambient_auth
+        )
 
 
 @lru_cache

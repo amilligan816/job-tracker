@@ -43,12 +43,24 @@ class Usage:
 
 @lru_cache
 def _client() -> anthropic.AsyncAnthropic:
+    """Build the client from whichever credential is configured.
+
+    The SDK resolves credentials in its own order -- api key, auth token, then
+    an `ant auth login` profile or workload identity on disk -- so with
+    `ANTHROPIC_AMBIENT_AUTH` set we hand it nothing and let it look.
+    """
     settings = get_settings()
     if not settings.assistant_enabled:
         raise AssistantUnavailable(
-            "Assistant features need ANTHROPIC_API_KEY to be set in the environment."
+            "Assistant features need a credential: set ANTHROPIC_API_KEY (or "
+            "ANTHROPIC_AUTH_TOKEN, or ANTHROPIC_AMBIENT_AUTH=true) in the environment."
         )
-    return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+
+    if settings.anthropic_api_key:
+        return anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    if settings.anthropic_auth_token:
+        return anthropic.AsyncAnthropic(auth_token=settings.anthropic_auth_token)
+    return anthropic.AsyncAnthropic()
 
 
 def _model() -> str:
